@@ -1,2 +1,4 @@
 private-key.pem
 public-key.pem
+.env
+.dev.vars
