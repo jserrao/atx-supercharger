@@ -2,6 +2,10 @@
   "name": "atx-supercharger",
   "compatibility_date": "2026-08-22",
   "main": "src/index.js",
+  "keep_vars": true,
+  "vars": {
+    "TESLA_PUBLIC_KEY": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2rd3CxVckY6RztrT3D8pm9USm11R\n2NzuVWQ9eRjf0BhdFwidQjTNq2kMg+Ya7jtJar+mTx5Bh98gDiOUuUbcew==\n-----END PUBLIC KEY-----\n"
+  },
   "routes": [
     {
       "pattern": "atx-superchargers.serraosays.com",
