@@ -124,6 +124,26 @@ function configuredVin() {
   return String(env.TESLA_VIN ?? "").trim();
 }
 
+function redactVin(value) {
+  const vin = configuredVin();
+  if (!vin) return value;
+  if (typeof value === "string") return value.replaceAll(vin, "[vin]");
+  if (value && typeof value === "object") {
+    try {
+      return JSON.parse(redactVin(JSON.stringify(value)));
+    } catch {
+      return value;
+    }
+  }
+  return value;
+}
+
+function publicLog(entry) {
+  if (!entry || typeof entry !== "object") return entry;
+  const { vin: _vin, ...rest } = entry;
+  return redactVin(rest);
+}
+
 function pickVehicle(vehicles) {
   const list = Array.isArray(vehicles) ? vehicles : [];
   const vin = configuredVin();
@@ -264,8 +284,8 @@ async function handleSample(request) {
     return html(
       renderPage({
         connected: true,
-        notice: "Set TESLA_VIN in .dev.vars (or Cloudflare vars) and reconnect.",
-        logs: await readJson(LOGS_KEY, []),
+        notice: "Vehicle is not configured on this Worker.",
+        logs: (await readJson(LOGS_KEY, [])).map(publicLog),
       }),
       404,
     );
@@ -280,14 +300,13 @@ async function handleSample(request) {
     at: new Date().toISOString(),
     condition,
     condition_label: CONDITIONS[condition],
-    vin: vehicle.vin,
     vehicle_name: vehicle.display_name ?? null,
     tesla_state: vehicle.state ?? null,
     nearby_ok: nearby.ok,
     nearby_status: nearby.status,
     nearby_error: nearby.ok
       ? null
-      : nearby.data?.error || nearby.data?.response || nearby.data,
+      : redactVin(nearby.data?.error || nearby.data?.response || nearby.data),
     latency_ms: Date.now() - started,
     ...summary,
   };
@@ -306,7 +325,7 @@ async function handleSample(request) {
 
   const accept = request.headers.get("accept") ?? "";
   if (accept.includes("application/json") || contentType.includes("application/json")) {
-    return json(entry, nearby.ok ? 200 : 502);
+    return json(publicLog(entry), nearby.ok ? 200 : 502);
   }
 
   return Response.redirect(new URL("/?sampled=1", request.url).toString(), 303);
@@ -319,10 +338,10 @@ function renderPage({
   notice = "",
 } = {}) {
   const vehicleLine = vehicle
-    ? `${escapeHtml(vehicle.display_name ?? "Tesla")} · ${escapeHtml(vehicle.vin)} · Tesla state: ${escapeHtml(vehicle.state ?? "unknown")}`
+    ? `${escapeHtml(vehicle.display_name ?? "Tesla")} · Tesla state: ${escapeHtml(vehicle.state ?? "unknown")}`
     : connected
-      ? `Connected, but ${configuredVin() ? `VIN ${escapeHtml(configuredVin())} was not on this account.` : "TESLA_VIN is not set."}`
-      : `Not connected. Configured VIN ${escapeHtml(configuredVin() || "(missing TESLA_VIN)")}. This app needs your Tesla account login — partner tokens cannot see the car.`;
+      ? "Connected, but the configured vehicle was not on this account."
+      : "Not connected. This app needs your Tesla account login — partner tokens cannot see the car.";
 
   const buttons = Object.entries(CONDITIONS)
     .map(
@@ -377,7 +396,7 @@ function renderPage({
 </head>
 <body>
   <h1>Nearby Supercharger experiment</h1>
-  <p>Does <code>GET /api/1/vehicles/{vin}/nearby_charging_sites</code> work without a live <code>vehicle_data</code> wake?</p>
+  <p>Does <code>nearby_charging_sites</code> work without a live <code>vehicle_data</code> wake?</p>
   <p>${vehicleLine}</p>
   ${notice ? `<p class="note">${escapeHtml(notice)}</p>` : ""}
   <p>
@@ -442,12 +461,8 @@ export default {
       }
 
       if (url.pathname === "/experiment/logs") {
-        return json(await readJson(LOGS_KEY, []));
-      }
-
-      if (url.pathname === "/vehicles") {
-        const result = await teslaGet("/api/1/vehicles");
-        return json(result, result.status);
+        const logs = await readJson(LOGS_KEY, []);
+        return json(logs.map(publicLog));
       }
 
       if (url.pathname !== "/") {
@@ -469,7 +484,7 @@ export default {
         renderPage({
           connected,
           vehicle,
-          logs: await readJson(LOGS_KEY, []),
+          logs: (await readJson(LOGS_KEY, [])).map(publicLog),
           notice,
         }),
       );
