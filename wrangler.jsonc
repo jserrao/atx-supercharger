@@ -2,6 +2,12 @@
   "name": "atx-supercharger",
   "compatibility_date": "2026-08-22",
   "main": "src/index.js",
+  "routes": [
+    {
+      "pattern": "atx-superchargers.serraosays.com",
+      "custom_domain": true
+    }
+  ],
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1,
