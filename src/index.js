@@ -3,6 +3,8 @@ import { env } from "cloudflare:workers";
 const TOKEN_KEY = "oauth:tokens";
 const LOGS_KEY = "experiment:logs";
 const MAX_LOGS = 200;
+const NEARBY_COUNT = 10;
+const NEARBY_RADIUS_MILES = 50;
 const TESLA_SCOPES =
   "openid offline_access vehicle_device_data vehicle_location";
 
@@ -67,6 +69,17 @@ async function teslaTokenRequest(params) {
     },
   );
   const payload = await response.json();
+  console.log(
+    JSON.stringify({
+      message: "tesla token response",
+      grant_type: params.grant_type,
+      status: response.status,
+      ok: response.ok,
+      keys:
+        payload && typeof payload === "object" ? Object.keys(payload) : [],
+      error: payload.error ?? null,
+    }),
+  );
   if (!response.ok) {
     const message =
       payload.error_description || payload.error || JSON.stringify(payload);
@@ -102,10 +115,20 @@ async function getAccessToken() {
   return next.access_token;
 }
 
+function teslaPathForLog(path) {
+  return redactVin(path);
+}
+
 async function teslaGet(path) {
   const accessToken = await getAccessToken();
   if (!accessToken) {
-    return { ok: false, status: 401, data: { error: "not_connected" } };
+    return {
+      ok: false,
+      status: 401,
+      method: "GET",
+      path,
+      data: { error: "not_connected" },
+    };
   }
 
   const response = await fetch(`${env.TESLA_AUDIENCE}${path}`, {
@@ -117,7 +140,23 @@ async function teslaGet(path) {
   } catch {
     data = { error: "non_json_response" };
   }
-  return { ok: response.ok, status: response.status, data };
+  return {
+    ok: response.ok,
+    status: response.status,
+    method: "GET",
+    path,
+    data,
+  };
+}
+
+function teslaCallLog(result) {
+  return redactVin({
+    method: result.method ?? "GET",
+    path: teslaPathForLog(result.path ?? ""),
+    status: result.status,
+    ok: result.ok,
+    body: result.data,
+  });
 }
 
 function configuredVin() {
@@ -292,9 +331,13 @@ async function handleSample(request) {
   }
 
   const nearby = await teslaGet(
-    `/api/1/vehicles/${encodeURIComponent(vehicle.vin)}/nearby_charging_sites`,
+    `/api/1/vehicles/${encodeURIComponent(vehicle.vin)}/nearby_charging_sites?count=${NEARBY_COUNT}&radius=${NEARBY_RADIUS_MILES}&detail=true`,
   );
   const summary = nearby.ok ? summarizeSites(nearby.data) : null;
+  const tesla_calls = [
+    teslaCallLog(vehiclesResult),
+    teslaCallLog(nearby),
+  ];
   const entry = {
     id: crypto.randomUUID(),
     at: new Date().toISOString(),
@@ -308,18 +351,20 @@ async function handleSample(request) {
       ? null
       : redactVin(nearby.data?.error || nearby.data?.response || nearby.data),
     latency_ms: Date.now() - started,
+    tesla_calls,
     ...summary,
   };
   await appendLog(entry);
 
   console.log(
     JSON.stringify({
-      message: "nearby_charging_sites sample",
+      message: "tesla sample",
       condition,
       tesla_state: entry.tesla_state,
       nearby_ok: entry.nearby_ok,
       nearby_status: entry.nearby_status,
       supercharger_count: entry.supercharger_count ?? null,
+      tesla_calls,
     }),
   );
 
