@@ -3,8 +3,8 @@ import { env } from "cloudflare:workers";
 const TOKEN_KEY = "oauth:tokens";
 const LOGS_KEY = "experiment:logs";
 const MAX_LOGS = 200;
-const NEARBY_COUNT = 10;
-const NEARBY_RADIUS_MILES = 50;
+const NEARBY_COUNT = 20;
+const NEARBY_RADIUS_MILES = 80;
 const TESLA_SCOPES =
   "openid offline_access vehicle_device_data vehicle_location";
 
