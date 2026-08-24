@@ -1,10 +1,48 @@
-## ATX Supercharger Status Checker
+# ATX Supercharger collector
 
-The goal of this tool is track Austin area Supercharger utilization rates. 
+Headless Cloudflare Worker that records Tesla Supercharger utilization in western and southwest Austin every five minutes.
 
-I've had a Tesla since late 2024 and the uptake for EVs and Teslas specifically has been intense in Central Texas. 
+Fleet API is the preferred source while the associated vehicle is online. GraphQL fallback is implemented but disabled until its authentication spike succeeds (`COLLECTOR_MODE=fleet_only`).
 
-This is likely some combination of cheap power from the huge solar and battery buildout going on in Texas, lack of cold weather, Iran war pushing oil prices up and the presence of Tesla in the city. The Superchargers Tesla has deployed in the region are woefully under capacity and constantly busy. Or maybe that's just my impression...
+The collector never calls `wake_up` or `vehicle_data`.
 
-So this app will help quantify this by using my Tesla as a reference point to access their Fleet API. We will set a geofence around the car to gain access to the supercharger status, log those results and view them over time.
+## What it stores
 
+D1 tables:
+
+- `stations` — canonical sites, reconciled across Fleet and GraphQL IDs
+- `poll_runs` — one row per five-minute cadence bucket
+- `station_samples` — in-bbox Supercharger observations
+- `raw_responses` — sanitized payloads, pruned after `RAW_RETENTION_DAYS`
+- `source_comparisons` — Fleet vs GraphQL stall diffs during `dual` mode
+
+Samples outside the configured bounding box are discarded.
+
+## HTTP surface
+
+| Path | Access |
+|---|---|
+| `/.well-known/appspecific/com.tesla.3p.public-key.pem` | Public (Tesla app requirement) |
+| `/auth/login` `/auth/callback` | Tesla OAuth |
+| `/health` | `Authorization: Bearer $COLLECTOR_ADMIN_TOKEN` |
+| `/collect` `POST` | Same admin token. Optional JSON `{ "force_source": "fleet" \| "graphql" \| "auto" }` |
+| `/auth/logout` | Admin token |
+
+## Commands
+
+```sh
+npm test
+npx wrangler types
+npx wrangler d1 migrations apply atx-supercharger --local
+npx wrangler d1 migrations apply atx-supercharger --remote
+npx wrangler secret put COLLECTOR_ADMIN_TOKEN
+npx wrangler deploy
+```
+
+Cron: `*/5 * * * *`.
+
+## Modes
+
+- `fleet_only` — production default. Asleep/offline/out-of-bbox polls are recorded without GraphQL.
+- `auto` — Fleet when the car is online and returns in-bbox Superchargers; otherwise GraphQL.
+- `dual` — like auto, plus a GraphQL comparison every 30 minutes while online.

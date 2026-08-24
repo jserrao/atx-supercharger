@@ -1,20 +1,44 @@
 {
+  "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "atx-supercharger",
-  "compatibility_date": "2026-08-22",
-  "main": "src/index.js",
+  "compatibility_date": "2026-08-24",
+  "compatibility_flags": ["nodejs_compat"],
+  "main": "src/index.ts",
   "keep_vars": true,
+  "account_id": "1c860ba17d80d33d65d0aaed0c60ba07",
   "vars": {
     "TESLA_AUDIENCE": "https://fleet-api.prd.na.vn.cloud.tesla.com",
     "TESLA_DOMAIN": "https://atx-superchargers.serraosays.com",
-    "TESLA_REDIRECT_URI": "https://atx-superchargers.serraosays.com/auth/callback"
+    "TESLA_REDIRECT_URI": "https://atx-superchargers.serraosays.com/auth/callback",
+    "COLLECTION_INTERVAL_MINUTES": "5",
+    "GRAPHQL_NORTH": "30.50",
+    "GRAPHQL_SOUTH": "30.00",
+    "GRAPHQL_WEST": "-98.25",
+    "GRAPHQL_EAST": "-97.70",
+    "FLEET_COUNT": "50",
+    "FLEET_RADIUS": "80",
+    "STALE_THRESHOLD_SECONDS": "900",
+    "MATCH_DISTANCE_METERS": "150",
+    "RAW_RETENTION_DAYS": "14",
+    "COLLECTOR_MODE": "fleet_only"
   },
-  "account_id": "1c860ba17d80d33d65d0aaed0c60ba07",
   "kv_namespaces": [
     {
       "binding": "KV",
       "id": "d87f8334a0ef4c2c834c32ce7af9f275"
     }
   ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "atx-supercharger",
+      "database_id": "28ec88f6-260c-4d71-a34f-89ef6848c662",
+      "migrations_dir": "./migrations"
+    }
+  ],
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
   "routes": [
     {
       "pattern": "atx-superchargers.serraosays.com",
