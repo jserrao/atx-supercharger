@@ -34,6 +34,7 @@ function obs(lat: number, lon: number): ChargerObservation {
 describe("observations", () => {
   it("computes occupancy and utilization", () => {
     expect(occupancyFromStalls(3, 10)).toEqual({ occupiedStalls: 7, utilizationPct: 70 });
+    expect(occupancyFromStalls(16, 24)).toEqual({ occupiedStalls: 8, utilizationPct: 33.33 });
   });
 
   it("does not divide by zero", () => {

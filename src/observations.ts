@@ -11,7 +11,7 @@ export function occupancyFromStalls(
   const occupiedStalls = Math.max(0, total - available);
   return {
     occupiedStalls,
-    utilizationPct: (occupiedStalls / total) * 100,
+    utilizationPct: Math.round((occupiedStalls / total) * 10000) / 100,
   };
 }
 

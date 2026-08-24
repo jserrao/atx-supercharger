@@ -126,6 +126,7 @@ export async function persistObservations(
   db: D1Database,
   config: AppConfig,
   pollRunId: string,
+  scheduledAt: string,
   observations: ChargerObservation[],
 ): Promise<{ sampleCount: number; stationIds: string[] }> {
   const stations = await listStations(db);
@@ -182,14 +183,16 @@ export async function persistObservations(
     statements.push(
       db.prepare(
         `INSERT INTO station_samples (
-           poll_run_id, station_id, station_name, source_station_id, observed_at, source,
-           available_stalls, total_stalls, occupied_stalls, utilization_pct, site_closed,
-           congestion_sync_at, congestion_age_seconds, is_stale, max_power_kw,
+           poll_run_id, station_id, station_name, source_station_id, scheduled_at, polled_at,
+           observed_at, source, available_stalls, total_stalls, occupied_stalls, utilization_pct,
+           site_closed, congestion_sync_at, congestion_age_seconds, is_stale, max_power_kw,
            hardware_generation, amenities, billing_info
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(poll_run_id, station_id) DO UPDATE SET
            station_name = excluded.station_name,
            source_station_id = excluded.source_station_id,
+           scheduled_at = excluded.scheduled_at,
+           polled_at = excluded.polled_at,
            observed_at = excluded.observed_at,
            source = excluded.source,
            available_stalls = excluded.available_stalls,
@@ -209,6 +212,8 @@ export async function persistObservations(
         station.id,
         observation.name,
         observation.sourceStationId,
+        scheduledAt,
+        observation.observedAt,
         observation.observedAt,
         observation.source,
         observation.availableStalls,

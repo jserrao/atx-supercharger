@@ -31,17 +31,27 @@ Statuses:
 
 ### `station_samples` — one row per station per successful poll
 
-| Field | Captures |
-|---|---|
-| `station_id` | Canonical UUID |
-| `station_name` | Display name at sample time |
-| `source_station_id` | Tesla Fleet or GraphQL site ID at sample time |
-| `source` | `fleet` or `graphql` |
-| `available_stalls` / `total_stalls` / `occupied_stalls` / `utilization_pct` | Congestion |
-| `site_closed` | Tesla site closure flag |
-| `congestion_sync_at` / `congestion_age_seconds` / `is_stale` | Tesla feed freshness (stale if age > `STALE_THRESHOLD_SECONDS`, default 15 minutes) |
-| `max_power_kw` / `hardware_generation` | Power and inferred V2/V3/V4 when Tesla sends enough signal |
-| `amenities` / `billing_info` | Site character; generation is often `unknown` on Fleet-only payloads |
+| Field | Type | Captures |
+|---|---|---|
+| `scheduled_at` | TEXT | Polling interval (5-minute cadence bucket). Use this for time series. |
+| `polled_at` | TEXT | Wall-clock time the collector captured this sample |
+| `observed_at` | TEXT | Same instant as `polled_at` (Tesla observation time) |
+| `available_stalls` | INTEGER | Open stalls from Tesla |
+| `total_stalls` | INTEGER | Stall count from Tesla |
+| `occupied_stalls` | INTEGER | `total_stalls - available_stalls` |
+| `utilization_pct` | REAL | `occupied_stalls / total_stalls * 100` |
+| `station_id` | TEXT | Canonical UUID |
+| `station_name` | TEXT | Display name at sample time |
+| `source_station_id` | TEXT | Tesla Fleet or GraphQL site ID at sample time |
+| `source` | TEXT | `fleet` or `graphql` |
+| `site_closed` | INTEGER | Tesla site closure flag |
+| `congestion_sync_at` | TEXT | Tesla congestion feed timestamp |
+| `congestion_age_seconds` | INTEGER | Age of Tesla congestion data vs poll |
+| `is_stale` | INTEGER | 1 if congestion age > `STALE_THRESHOLD_SECONDS` (default 15 minutes) |
+| `max_power_kw` | INTEGER | When Tesla/GraphQL send it |
+| `hardware_generation` | TEXT | Inferred V2/V3/V4; often `unknown` on Fleet-only payloads |
+| `amenities` | TEXT | Site amenities string |
+| `billing_info` | TEXT | Fleet billing blob when present |
 
 Samples outside the configured bounding box are discarded. Destination chargers are not stored as samples.
 

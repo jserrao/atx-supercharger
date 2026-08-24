@@ -155,6 +155,7 @@ export async function runCollection(env: Env, options: CollectOptions = {}): Pro
         env,
         config,
         pollRunId,
+        scheduledAt,
         graphql,
       ));
     } else {
@@ -184,6 +185,7 @@ export async function runCollection(env: Env, options: CollectOptions = {}): Pro
             env,
             config,
             pollRunId,
+            scheduledAt,
             fallback,
             "fleet_error",
           ));
@@ -206,6 +208,7 @@ export async function runCollection(env: Env, options: CollectOptions = {}): Pro
             env,
             config,
             pollRunId,
+            scheduledAt,
             graphql,
             "fleet_vehicle_offline",
           ));
@@ -235,7 +238,13 @@ export async function runCollection(env: Env, options: CollectOptions = {}): Pro
           if (fleet.ok) {
             const inBbox = filterToBbox(fleet.observations, config.bbox);
             if (inBbox.length > 0) {
-              const saved = await persistObservations(env.DB, config, pollRunId, inBbox);
+              const saved = await persistObservations(
+                env.DB,
+                config,
+                pollRunId,
+                scheduledAt,
+                inBbox,
+              );
               sampleCount = saved.sampleCount;
               persisted = inBbox;
               sourceUsed = "fleet";
@@ -267,6 +276,7 @@ export async function runCollection(env: Env, options: CollectOptions = {}): Pro
                 env,
                 config,
                 pollRunId,
+                scheduledAt,
                 graphql,
                 reason,
               ));
@@ -377,6 +387,7 @@ async function handleGraphqlOnly(
   env: Env,
   config: AppConfig,
   pollRunId: string,
+  scheduledAt: string,
   graphql: ProviderResult,
 ): Promise<{
   status: PollStatus;
@@ -385,13 +396,14 @@ async function handleGraphqlOnly(
   persisted: ChargerObservation[];
   sourceUsed: string | null;
 }> {
-  return handleGraphqlFallback(env, config, pollRunId, graphql, "graphql_error");
+  return handleGraphqlFallback(env, config, pollRunId, scheduledAt, graphql, "graphql_error");
 }
 
 async function handleGraphqlFallback(
   env: Env,
   config: AppConfig,
   pollRunId: string,
+  scheduledAt: string,
   graphql: ProviderResult,
   fallbackReason: PollStatus,
 ): Promise<{
@@ -440,7 +452,7 @@ async function handleGraphqlFallback(
     };
   }
 
-  const saved = await persistObservations(env.DB, config, pollRunId, inBbox);
+  const saved = await persistObservations(env.DB, config, pollRunId, scheduledAt, inBbox);
   await recordSuccess(env.KV, "graphql", inBbox[0]?.observedAt ?? new Date().toISOString());
   return {
     status: "success",
