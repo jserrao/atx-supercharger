@@ -52,7 +52,13 @@ export function applyObservationToStation(
       longitude: observation.longitude,
       total_stalls: observation.totalStalls,
       max_power_kw: observation.maxPowerKw,
-      amenities: observation.amenities == null ? null : JSON.stringify(observation.amenities),
+      hardware_generation: observation.hardwareGeneration,
+      amenities:
+        typeof observation.amenities === "string"
+          ? observation.amenities
+          : observation.amenities == null
+            ? null
+            : JSON.stringify(observation.amenities),
       match_method: method,
       first_seen_at: nowIso,
       last_seen_at: nowIso,
@@ -62,15 +68,21 @@ export function applyObservationToStation(
   return {
     ...existing,
     [column]: existing[column] ?? observation.sourceStationId,
-    name: existing.name || observation.name,
+    name: observation.name || existing.name,
     latitude: existing.latitude,
     longitude: existing.longitude,
     total_stalls: observation.totalStalls ?? existing.total_stalls,
     max_power_kw: observation.maxPowerKw ?? existing.max_power_kw,
+    hardware_generation:
+      observation.hardwareGeneration !== "unknown"
+        ? observation.hardwareGeneration
+        : existing.hardware_generation,
     amenities:
       observation.amenities == null
         ? existing.amenities
-        : JSON.stringify(observation.amenities),
+        : typeof observation.amenities === "string"
+          ? observation.amenities
+          : JSON.stringify(observation.amenities),
     match_method: existing.match_method ?? method,
     last_seen_at: nowIso,
   };

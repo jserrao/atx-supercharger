@@ -1,5 +1,6 @@
 import { loadConfig } from "./config";
-import { healthPayload, runCollection } from "./collector";
+import { runCollection } from "./collector";
+import { healthPayload } from "./health";
 import { requireAdmin } from "./admin";
 import {
   TOKEN_KEY,
@@ -85,7 +86,8 @@ export default {
       if (url.pathname === "/health") {
         const denied = await requireAdmin(request, env);
         if (denied) return denied;
-        return Response.json(await healthPayload(env));
+        const hours = Number(url.searchParams.get("hours") ?? 24);
+        return Response.json(await healthPayload(env, new Date(), hours));
       }
 
       if (url.pathname === "/collect" && request.method === "POST") {

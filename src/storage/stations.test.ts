@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChargerObservation, StationRecord } from "../types";
-import { matchStation } from "./stations";
+import { applyObservationToStation, matchStation } from "./stations";
 
 function station(overrides: Partial<StationRecord>): StationRecord {
   return {
@@ -12,6 +12,7 @@ function station(overrides: Partial<StationRecord>): StationRecord {
     longitude: -97.952,
     total_stalls: 8,
     max_power_kw: 250,
+    hardware_generation: "v3_or_v4",
     amenities: null,
     match_method: "source_id",
     first_seen_at: "2026-08-24T00:00:00.000Z",
@@ -33,6 +34,8 @@ function observation(overrides: Partial<ChargerObservation>): ChargerObservation
     utilizationPct: 62.5,
     siteClosed: false,
     maxPowerKw: 250,
+    hardwareGeneration: "v3_or_v4",
+    billingInfo: null,
     congestionSyncAt: null,
     congestionAgeSeconds: null,
     observedAt: "2026-08-24T00:00:00.000Z",
@@ -70,6 +73,27 @@ describe("station matching", () => {
       150,
     );
     expect(match).toBeNull();
+  });
+
+  it("keeps Tesla source IDs and the display name on the canonical station", () => {
+    const created = applyObservationToStation(
+      null,
+      observation({ source: "fleet", sourceStationId: "4242", name: "Bee Cave" }),
+      "2026-08-24T00:00:00.000Z",
+      "created",
+    );
+    expect(created.fleet_id).toBe("4242");
+    expect(created.name).toBe("Bee Cave");
+    expect(created.hardware_generation).toBe("v3_or_v4");
+
+    const renamed = applyObservationToStation(
+      created,
+      observation({ source: "fleet", sourceStationId: "4242", name: "Austin - Bee Cave" }),
+      "2026-08-24T00:05:00.000Z",
+      "source_id",
+    );
+    expect(renamed.fleet_id).toBe("4242");
+    expect(renamed.name).toBe("Austin - Bee Cave");
   });
 
   it("does not match on name alone", () => {

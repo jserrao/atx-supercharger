@@ -48,6 +48,7 @@ describe("graphql provider", () => {
       utilizationPct: 50,
       siteClosed: false,
       maxPowerKw: 250,
+      hardwareGeneration: "v3_or_v4",
     });
   });
 });

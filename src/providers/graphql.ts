@@ -1,5 +1,6 @@
 import type { AppConfig, ChargerObservation, ProviderResult } from "../types";
 import { teslaPost } from "../auth/tesla";
+import { siteHardwareFromRaw } from "../hardware";
 import { asFiniteNumber, occupancyFromStalls } from "../observations";
 
 export const GRAPHQL_URL =
@@ -124,6 +125,7 @@ export function normalizeGraphqlSites(
       availableStalls,
       totalStalls,
     );
+    const hardware = siteHardwareFromRaw(site, name);
 
     observations.push({
       source: "graphql",
@@ -136,11 +138,13 @@ export function normalizeGraphqlSites(
       occupiedStalls,
       utilizationPct,
       siteClosed: Array.isArray(site.activeOutages) && site.activeOutages.length > 0,
-      maxPowerKw: asFiniteNumber(site.maxPowerKw ?? site.max_power_kw),
+      maxPowerKw: hardware.maxPowerKw,
+      hardwareGeneration: hardware.hardwareGeneration,
+      billingInfo: hardware.billingInfo,
       congestionSyncAt: null,
       congestionAgeSeconds: null,
       observedAt,
-      amenities: null,
+      amenities: hardware.amenities,
       raw: item,
     });
   }

@@ -1,5 +1,7 @@
 export type ObservationSource = "fleet" | "graphql";
 
+export type HardwareGeneration = "v2" | "v3" | "v4" | "v3_or_v4" | "unknown";
+
 export type CollectorMode = "fleet_only" | "auto" | "dual";
 
 export type PollStatus =
@@ -28,6 +30,8 @@ export type ChargerObservation = {
   utilizationPct: number | null;
   siteClosed: boolean | null;
   maxPowerKw: number | null;
+  hardwareGeneration: HardwareGeneration;
+  billingInfo: string | null;
   congestionSyncAt: string | null;
   congestionAgeSeconds: number | null;
   observedAt: string;
@@ -92,6 +96,7 @@ export type StationRecord = {
   longitude: number;
   total_stalls: number | null;
   max_power_kw: number | null;
+  hardware_generation: HardwareGeneration | null;
   amenities: string | null;
   match_method: string | null;
   first_seen_at: string;

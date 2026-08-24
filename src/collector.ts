@@ -6,7 +6,6 @@ import { fetchNearbyChargingSites, fetchVehicleList } from "./providers/fleet";
 import { fetchGraphqlNearbySites } from "./providers/graphql";
 import {
   completePollRun,
-  coverageSince,
   getPollRunByScheduledAt,
   insertComparisons,
   insertPollRun,
@@ -14,7 +13,7 @@ import {
   persistObservations,
   pruneRawResponses,
 } from "./storage/d1";
-import { acquireLock, readCollectorMarkers, recordSuccess, releaseLock } from "./storage/kv";
+import { acquireLock, recordSuccess, releaseLock } from "./storage/kv";
 import { haversineMeters, namesReasonablyMatch } from "./geo";
 import { sanitizeRaw } from "./redact";
 import type {
@@ -449,44 +448,5 @@ async function handleGraphqlFallback(
     sampleCount: saved.sampleCount,
     persisted: inBbox,
     sourceUsed: "graphql",
-  };
-}
-
-export async function healthPayload(env: Env): Promise<Record<string, unknown>> {
-  const config = loadConfig(env);
-  const now = new Date();
-  const since = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
-  const expected = Math.floor((24 * 60) / config.collectionIntervalMinutes);
-  const coverage = await coverageSince(env.DB, since);
-  const markers = await readCollectorMarkers(env.KV);
-  const invocationPct = expected > 0 ? (coverage.invocations / expected) * 100 : 0;
-  const samplePct = expected > 0 ? (coverage.withSamples / expected) * 100 : 0;
-
-  return {
-    service: "atx-supercharger-collector",
-    mode: config.collectorMode,
-    graphql_enabled: graphqlEnabled(config.collectorMode),
-    last_success: markers.lastSuccess,
-    last_fleet_success: markers.lastFleetSuccess,
-    last_graphql_success: markers.lastGraphqlSuccess,
-    last_poll: coverage.last
-      ? {
-          id: coverage.last.id,
-          scheduled_at: coverage.last.scheduled_at,
-          status: coverage.last.status,
-          sample_count: coverage.last.sample_count,
-          vehicle_state: coverage.last.vehicle_state,
-          source_used: coverage.last.source_used,
-          error: coverage.last.error,
-        }
-      : null,
-    coverage_24h: {
-      expected_buckets: expected,
-      invocations: coverage.invocations,
-      with_samples: coverage.withSamples,
-      invocation_pct: Number(invocationPct.toFixed(1)),
-      sample_pct: Number(samplePct.toFixed(1)),
-    },
-    bbox: config.bbox,
   };
 }

@@ -13,6 +13,7 @@ const payload = {
         available_stalls: 2,
         total_stalls: 8,
         site_closed: false,
+        amenities: "restrooms,restaurant",
       },
       {
         name: "Missing coords",
@@ -67,6 +68,9 @@ describe("fleet provider", () => {
       occupiedStalls: 6,
       utilizationPct: 75,
       siteClosed: false,
+      hardwareGeneration: "unknown",
+      amenities: "restrooms,restaurant",
+      maxPowerKw: null,
     });
     expect(sites[0]?.congestionSyncAt).toBe("2023-11-14T22:13:20.000Z");
   });

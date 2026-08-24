@@ -1,5 +1,6 @@
 import type { AppConfig, ChargerObservation, ProviderResult, VehicleSnapshot } from "../types";
 import { teslaGet } from "../auth/tesla";
+import { siteHardwareFromRaw } from "../hardware";
 import { asFiniteNumber, occupancyFromStalls, unixSecondsToIso } from "../observations";
 
 type FleetSite = {
@@ -70,6 +71,7 @@ export function normalizeFleetSites(
       availableStalls,
       totalStalls,
     );
+    const hardware = siteHardwareFromRaw(site, name);
 
     observations.push({
       source: "fleet",
@@ -82,13 +84,15 @@ export function normalizeFleetSites(
       occupiedStalls,
       utilizationPct,
       siteClosed: typeof site.site_closed === "boolean" ? site.site_closed : null,
-      maxPowerKw: asFiniteNumber(site.max_power_kw),
+      maxPowerKw: hardware.maxPowerKw,
+      hardwareGeneration: hardware.hardwareGeneration,
+      billingInfo: hardware.billingInfo,
       congestionSyncAt,
       congestionAgeSeconds: congestionSyncAt
         ? Math.max(0, Math.round((Date.parse(observedAt) - Date.parse(congestionSyncAt)) / 1000))
         : null,
       observedAt,
-      amenities: site.amenities ?? null,
+      amenities: hardware.amenities,
       raw: item,
     });
   }

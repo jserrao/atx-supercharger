@@ -21,6 +21,8 @@ function obs(lat: number, lon: number): ChargerObservation {
     utilizationPct: 50,
     siteClosed: false,
     maxPowerKw: 250,
+    hardwareGeneration: "unknown",
+    billingInfo: null,
     congestionSyncAt: null,
     congestionAgeSeconds: null,
     observedAt: "2026-08-24T00:00:00.000Z",

@@ -91,14 +91,15 @@ export async function upsertStation(db: D1Database, station: StationRecord): Pro
     .prepare(
       `INSERT INTO stations (
          id, fleet_id, graphql_id, name, latitude, longitude, total_stalls,
-         max_power_kw, amenities, match_method, first_seen_at, last_seen_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         max_power_kw, hardware_generation, amenities, match_method, first_seen_at, last_seen_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          fleet_id = COALESCE(excluded.fleet_id, stations.fleet_id),
          graphql_id = COALESCE(excluded.graphql_id, stations.graphql_id),
          name = excluded.name,
          total_stalls = COALESCE(excluded.total_stalls, stations.total_stalls),
          max_power_kw = COALESCE(excluded.max_power_kw, stations.max_power_kw),
+         hardware_generation = COALESCE(excluded.hardware_generation, stations.hardware_generation),
          amenities = COALESCE(excluded.amenities, stations.amenities),
          match_method = COALESCE(stations.match_method, excluded.match_method),
          last_seen_at = excluded.last_seen_at`,
@@ -112,6 +113,7 @@ export async function upsertStation(db: D1Database, station: StationRecord): Pro
       station.longitude,
       station.total_stalls,
       station.max_power_kw,
+      station.hardware_generation,
       station.amenities,
       station.match_method,
       station.first_seen_at,
@@ -147,14 +149,15 @@ export async function persistObservations(
       db.prepare(
         `INSERT INTO stations (
            id, fleet_id, graphql_id, name, latitude, longitude, total_stalls,
-           max_power_kw, amenities, match_method, first_seen_at, last_seen_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           max_power_kw, hardware_generation, amenities, match_method, first_seen_at, last_seen_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            fleet_id = COALESCE(excluded.fleet_id, stations.fleet_id),
            graphql_id = COALESCE(excluded.graphql_id, stations.graphql_id),
            name = excluded.name,
            total_stalls = COALESCE(excluded.total_stalls, stations.total_stalls),
            max_power_kw = COALESCE(excluded.max_power_kw, stations.max_power_kw),
+           hardware_generation = COALESCE(excluded.hardware_generation, stations.hardware_generation),
            amenities = COALESCE(excluded.amenities, stations.amenities),
            match_method = COALESCE(stations.match_method, excluded.match_method),
            last_seen_at = excluded.last_seen_at`,
@@ -167,6 +170,7 @@ export async function persistObservations(
         station.longitude,
         station.total_stalls,
         station.max_power_kw,
+        station.hardware_generation,
         station.amenities,
         station.match_method,
         station.first_seen_at,
@@ -178,11 +182,14 @@ export async function persistObservations(
     statements.push(
       db.prepare(
         `INSERT INTO station_samples (
-           poll_run_id, station_id, observed_at, source, available_stalls, total_stalls,
-           occupied_stalls, utilization_pct, site_closed, congestion_sync_at,
-           congestion_age_seconds, is_stale
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           poll_run_id, station_id, station_name, source_station_id, observed_at, source,
+           available_stalls, total_stalls, occupied_stalls, utilization_pct, site_closed,
+           congestion_sync_at, congestion_age_seconds, is_stale, max_power_kw,
+           hardware_generation, amenities, billing_info
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(poll_run_id, station_id) DO UPDATE SET
+           station_name = excluded.station_name,
+           source_station_id = excluded.source_station_id,
            observed_at = excluded.observed_at,
            source = excluded.source,
            available_stalls = excluded.available_stalls,
@@ -192,10 +199,16 @@ export async function persistObservations(
            site_closed = excluded.site_closed,
            congestion_sync_at = excluded.congestion_sync_at,
            congestion_age_seconds = excluded.congestion_age_seconds,
-           is_stale = excluded.is_stale`,
+           is_stale = excluded.is_stale,
+           max_power_kw = excluded.max_power_kw,
+           hardware_generation = excluded.hardware_generation,
+           amenities = excluded.amenities,
+           billing_info = excluded.billing_info`,
       ).bind(
         pollRunId,
         station.id,
+        observation.name,
+        observation.sourceStationId,
         observation.observedAt,
         observation.source,
         observation.availableStalls,
@@ -206,6 +219,14 @@ export async function persistObservations(
         observation.congestionSyncAt,
         observation.congestionAgeSeconds,
         stale,
+        observation.maxPowerKw,
+        observation.hardwareGeneration,
+        typeof observation.amenities === "string"
+          ? observation.amenities
+          : observation.amenities == null
+            ? null
+            : JSON.stringify(observation.amenities),
+        observation.billingInfo,
       ),
     );
     stationIds.push(station.id);
@@ -269,20 +290,141 @@ export async function pruneRawResponses(
   await db.prepare("DELETE FROM raw_responses WHERE created_at < ?").bind(cutoff).run();
 }
 
-export async function coverageSince(
-  db: D1Database,
-  sinceIso: string,
-): Promise<{ invocations: number; withSamples: number; last: PollRunRow | null }> {
-  const rows = await db
-    .prepare(
-      `SELECT * FROM poll_runs WHERE scheduled_at >= ? ORDER BY scheduled_at DESC`,
-    )
-    .bind(sinceIso)
-    .all<PollRunRow>();
-  const results = rows.results ?? [];
+export type HttpErrorCount = {
+  source: "fleet" | "graphql";
+  httpStatus: number;
+  count: number;
+};
+
+export type CollectionStats = {
+  invocations: number;
+  successfulPolls: number;
+  fleetPolls: number;
+  graphqlPolls: number;
+  failedPolls: number;
+  offlinePolls: number;
+  outOfRegionPolls: number;
+  avgLatencyMs: number | null;
+  avgStationsPerPoll: number | null;
+  avgStationsWhenSampled: number | null;
+  firstScheduledAt: string | null;
+  last: PollRunRow | null;
+  statusCounts: Record<string, number>;
+  httpErrors: HttpErrorCount[];
+  samples: number;
+  staleSamples: number;
+};
+
+function round1(value: number | null | undefined): number | null {
+  if (value == null || !Number.isFinite(Number(value))) return null;
+  return Number(Number(value).toFixed(1));
+}
+
+export async function collectionStatsSince(db: D1Database, sinceIso: string): Promise<CollectionStats> {
+  const [totals, statuses, fleetErrors, graphqlErrors, sampleCounts, last] = await Promise.all([
+    db
+      .prepare(
+        `SELECT
+           COUNT(*) AS invocations,
+           SUM(CASE WHEN status IN ('success', 'partial_success') THEN 1 ELSE 0 END) AS successful_polls,
+           SUM(CASE WHEN source_used = 'fleet' THEN 1 ELSE 0 END) AS fleet_polls,
+           SUM(CASE WHEN source_used = 'graphql' THEN 1 ELSE 0 END) AS graphql_polls,
+           SUM(CASE WHEN status IN ('fleet_error', 'graphql_error', 'graphql_auth_failure', 'rate_limited', 'not_connected', 'no_data') THEN 1 ELSE 0 END) AS failed_polls,
+           SUM(CASE WHEN status = 'fleet_vehicle_offline' THEN 1 ELSE 0 END) AS offline_polls,
+           SUM(CASE WHEN status = 'fleet_out_of_region' THEN 1 ELSE 0 END) AS out_of_region_polls,
+           AVG(latency_ms) AS avg_latency_ms,
+           AVG(sample_count) AS avg_stations_per_poll,
+           AVG(CASE WHEN sample_count > 0 THEN sample_count END) AS avg_stations_when_sampled,
+           MIN(scheduled_at) AS first_scheduled_at
+         FROM poll_runs
+         WHERE scheduled_at >= ?`,
+      )
+      .bind(sinceIso)
+      .first<{
+        invocations: number;
+        successful_polls: number;
+        fleet_polls: number;
+        graphql_polls: number;
+        failed_polls: number;
+        offline_polls: number;
+        out_of_region_polls: number;
+        avg_latency_ms: number | null;
+        avg_stations_per_poll: number | null;
+        avg_stations_when_sampled: number | null;
+        first_scheduled_at: string | null;
+      }>(),
+    db
+      .prepare(
+        `SELECT status, COUNT(*) AS n FROM poll_runs WHERE scheduled_at >= ? GROUP BY status`,
+      )
+      .bind(sinceIso)
+      .all<{ status: string; n: number }>(),
+    db
+      .prepare(
+        `SELECT fleet_status AS http_status, COUNT(*) AS n
+         FROM poll_runs
+         WHERE scheduled_at >= ? AND fleet_status IS NOT NULL AND fleet_status >= 400
+         GROUP BY fleet_status`,
+      )
+      .bind(sinceIso)
+      .all<{ http_status: number; n: number }>(),
+    db
+      .prepare(
+        `SELECT graphql_status AS http_status, COUNT(*) AS n
+         FROM poll_runs
+         WHERE scheduled_at >= ? AND graphql_status IS NOT NULL AND graphql_status >= 400
+         GROUP BY graphql_status`,
+      )
+      .bind(sinceIso)
+      .all<{ http_status: number; n: number }>(),
+    db
+      .prepare(
+        `SELECT COUNT(*) AS samples, SUM(CASE WHEN is_stale = 1 THEN 1 ELSE 0 END) AS stale_samples
+         FROM station_samples
+         WHERE observed_at >= ?`,
+      )
+      .bind(sinceIso)
+      .first<{ samples: number; stale_samples: number }>(),
+    db
+      .prepare(`SELECT * FROM poll_runs WHERE scheduled_at >= ? ORDER BY scheduled_at DESC LIMIT 1`)
+      .bind(sinceIso)
+      .first<PollRunRow>(),
+  ]);
+
+  const statusCounts: Record<string, number> = {};
+  for (const row of statuses.results ?? []) {
+    statusCounts[row.status] = Number(row.n) || 0;
+  }
+
+  const httpErrors: HttpErrorCount[] = [
+    ...(fleetErrors.results ?? []).map((row) => ({
+      source: "fleet" as const,
+      httpStatus: Number(row.http_status),
+      count: Number(row.n) || 0,
+    })),
+    ...(graphqlErrors.results ?? []).map((row) => ({
+      source: "graphql" as const,
+      httpStatus: Number(row.http_status),
+      count: Number(row.n) || 0,
+    })),
+  ];
+
   return {
-    invocations: results.length,
-    withSamples: results.filter((row) => (row.sample_count ?? 0) > 0).length,
-    last: results[0] ?? null,
+    invocations: Number(totals?.invocations) || 0,
+    successfulPolls: Number(totals?.successful_polls) || 0,
+    fleetPolls: Number(totals?.fleet_polls) || 0,
+    graphqlPolls: Number(totals?.graphql_polls) || 0,
+    failedPolls: Number(totals?.failed_polls) || 0,
+    offlinePolls: Number(totals?.offline_polls) || 0,
+    outOfRegionPolls: Number(totals?.out_of_region_polls) || 0,
+    avgLatencyMs: round1(totals?.avg_latency_ms),
+    avgStationsPerPoll: round1(totals?.avg_stations_per_poll),
+    avgStationsWhenSampled: round1(totals?.avg_stations_when_sampled),
+    firstScheduledAt: totals?.first_scheduled_at ?? null,
+    last: last ?? null,
+    statusCounts,
+    httpErrors,
+    samples: Number(sampleCounts?.samples) || 0,
+    staleSamples: Number(sampleCounts?.stale_samples) || 0,
   };
 }
