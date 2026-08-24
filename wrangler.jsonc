@@ -20,7 +20,7 @@
     "STALE_THRESHOLD_SECONDS": "900",
     "MATCH_DISTANCE_METERS": "150",
     "RAW_RETENTION_DAYS": "14",
-    "COLLECTOR_MODE": "fleet_only"
+    "COLLECTOR_MODE": "auto"
   },
   "kv_namespaces": [
     {

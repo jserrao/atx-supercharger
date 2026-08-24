@@ -368,7 +368,10 @@ export async function collectionStatsSince(db: D1Database, sinceIso: string): Pr
       .prepare(
         `SELECT fleet_status AS http_status, COUNT(*) AS n
          FROM poll_runs
-         WHERE scheduled_at >= ? AND fleet_status IS NOT NULL AND fleet_status >= 400
+         WHERE scheduled_at >= ?
+           AND fleet_status IS NOT NULL
+           AND fleet_status >= 400
+           AND status NOT IN ('fleet_vehicle_offline')
          GROUP BY fleet_status`,
       )
       .bind(sinceIso)

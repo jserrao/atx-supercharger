@@ -2,7 +2,7 @@
 
 Headless Cloudflare Worker that records Tesla Supercharger utilization in western and southwest Austin every five minutes.
 
-Fleet API is preferred while the associated vehicle is online. GraphQL fallback is implemented but disabled until its authentication spike succeeds (`COLLECTOR_MODE=fleet_only`). The collector never calls `wake_up` or `vehicle_data`.
+Fleet API is preferred while the associated vehicle is online. If the car is asleep/offline, Fleet returns 408, or Fleet returns no in-bbox Superchargers, the collector falls back to Tesla’s charging GraphQL API (`COLLECTOR_MODE=auto`). The collector never calls `wake_up` or `vehicle_data`.
 
 ## Data capture
 
@@ -99,7 +99,7 @@ In `fleet_only`, `coverage_pct` will stay well below 95% whenever the vehicle is
 |---|---|
 | `/.well-known/appspecific/com.tesla.3p.public-key.pem` | Public (Tesla app requirement) |
 | `/auth/login` `/auth/callback` | Tesla OAuth |
-| `/health` | `Authorization: Bearer $COLLECTOR_ADMIN_TOKEN` |
+| `/health` | `Authorization: Bearer <Worker secret>` |
 | `/collect` `POST` | Same admin token. Optional JSON `{ "force_source": "fleet" \| "graphql" \| "auto" }` |
 | `/auth/logout` | Admin token |
 
@@ -114,10 +114,20 @@ npx wrangler secret put COLLECTOR_ADMIN_TOKEN
 npx wrangler deploy
 ```
 
+`$COLLECTOR_ADMIN_TOKEN` in your shell is not the Worker secret. After `wrangler secret put`, use that same string:
+
+```sh
+export COLLECTOR_ADMIN_TOKEN='the-value-you-just-put'
+curl -sS https://atx-superchargers.serraosays.com/health \
+  -H "Authorization: Bearer $COLLECTOR_ADMIN_TOKEN"
+```
+
+If the secret was piped with `echo`, it may contain a trailing newline and never match. Prefer the interactive `wrangler secret put` prompt.
+
 Cron: `*/5 * * * *`.
 
 ## Modes
 
-- `fleet_only` — production default. Asleep/offline/out-of-bbox polls are recorded without GraphQL.
-- `auto` — Fleet when the car is online and returns in-bbox Superchargers; otherwise GraphQL.
+- `fleet_only` — Fleet only. Asleep/offline/out-of-bbox polls are recorded without GraphQL.
+- `auto` — current production mode. Fleet when the car is online and returns in-bbox Superchargers; otherwise GraphQL.
 - `dual` — like auto, plus a GraphQL comparison every 30 minutes while online.
