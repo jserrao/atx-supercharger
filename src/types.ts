@@ -1,4 +1,4 @@
-export type ObservationSource = "fleet" | "graphql";
+export type ObservationSource = "fleet" | "google" | "graphql";
 
 export type HardwareGeneration = "v2" | "v3" | "v4" | "v3_or_v4" | "unknown";
 
@@ -10,9 +10,10 @@ export type PollStatus =
   | "fleet_vehicle_offline"
   | "fleet_out_of_region"
   | "fleet_error"
-  | "graphql_error"
-  | "graphql_auth_failure"
-  | "graphql_disabled"
+  | "google_cooldown"
+  | "google_error"
+  | "google_auth_failure"
+  | "google_rate_limited"
   | "rate_limited"
   | "no_data"
   | "not_connected"
@@ -55,6 +56,9 @@ export type AppConfig = {
   matchDistanceMeters: number;
   rawRetentionDays: number;
   collectorMode: CollectorMode;
+  googleFallbackMinutes: number;
+  googleDiscovery: boolean;
+  googlePlacesApiKey: string;
   teslaAudience: string;
   teslaRedirectUri: string;
   teslaVin: string;
@@ -79,6 +83,7 @@ export type ProviderResult = {
   observations: ChargerObservation[];
   raw: unknown;
   error: string | null;
+  requestCount: number;
 };
 
 export type VehicleSnapshot = {
@@ -91,6 +96,7 @@ export type StationRecord = {
   id: string;
   fleet_id: string | null;
   graphql_id: string | null;
+  google_place_id: string | null;
   name: string;
   latitude: number;
   longitude: number;
@@ -106,7 +112,7 @@ export type StationRecord = {
 export type SourceComparison = {
   stationId: string | null;
   fleetAvailable: number | null;
-  graphqlAvailable: number | null;
+  googleAvailable: number | null;
   availableDelta: number | null;
   congestionAgeDeltaSeconds: number | null;
   identityMatch: boolean;

@@ -1,12 +1,12 @@
 import { expectedBucketsSince } from "./cadence";
-import { graphqlEnabled, loadConfig } from "./config";
+import { googleEnabled, loadConfig } from "./config";
 import { collectionStatsSince, type CollectionStats } from "./storage/d1";
-import { readCollectorMarkers } from "./storage/kv";
 
 export const FAILED_POLL_STATUSES = [
   "fleet_error",
-  "graphql_error",
-  "graphql_auth_failure",
+  "google_error",
+  "google_auth_failure",
+  "google_rate_limited",
   "rate_limited",
   "not_connected",
   "no_data",
@@ -32,13 +32,8 @@ export function assembleHealth(args: {
   sinceIso: string;
   stats: CollectionStats;
   mode: string;
-  graphqlOn: boolean;
+  googleOn: boolean;
   bbox: { north: number; south: number; west: number; east: number };
-  markers: {
-    lastSuccess: string | null;
-    lastFleetSuccess: string | null;
-    lastGraphqlSuccess: string | null;
-  };
 }): Record<string, unknown> {
   const scheduled = scheduledPolls(args.windowHours, args.intervalMinutes);
   const elapsed = args.stats.firstScheduledAt
@@ -49,7 +44,7 @@ export function assembleHealth(args: {
   return {
     service: "atx-supercharger-collector",
     mode: args.mode,
-    graphql_enabled: args.graphqlOn,
+    google_enabled: args.googleOn,
     window: {
       hours: args.windowHours,
       since: args.sinceIso,
@@ -66,21 +61,23 @@ export function assembleHealth(args: {
     },
     polls: {
       fleet: args.stats.fleetPolls,
-      graphql: args.stats.graphqlPolls,
+      google: args.stats.googlePolls,
       failed: args.stats.failedPolls,
       fleet_vehicle_offline: args.stats.offlinePolls,
+      google_cooldown: args.stats.cooldownPolls,
       fleet_out_of_region: args.stats.outOfRegionPolls,
       avg_latency_ms: args.stats.avgLatencyMs,
       avg_stations_per_poll: args.stats.avgStationsPerPoll,
       avg_stations_when_sampled: args.stats.avgStationsWhenSampled,
+      google_requests: args.stats.googleRequests,
       by_status: args.stats.statusCounts,
     },
     api_errors_by_source: {
       fleet: args.stats.httpErrors
         .filter((row) => row.source === "fleet")
         .map((row) => ({ http_status: row.httpStatus, count: row.count })),
-      graphql: args.stats.httpErrors
-        .filter((row) => row.source === "graphql")
+      google: args.stats.httpErrors
+        .filter((row) => row.source === "google")
         .map((row) => ({ http_status: row.httpStatus, count: row.count })),
     },
     samples: {
@@ -88,9 +85,9 @@ export function assembleHealth(args: {
       stale_congestion: args.stats.staleSamples,
       stale_pct: pct(args.stats.staleSamples, args.stats.samples),
     },
-    last_success: args.markers.lastSuccess,
-    last_fleet_success: args.markers.lastFleetSuccess,
-    last_graphql_success: args.markers.lastGraphqlSuccess,
+    last_success: args.stats.lastSuccessAt,
+    last_fleet_success: args.stats.lastFleetSuccessAt,
+    last_google_success: args.stats.lastGoogleSuccessAt,
     last_poll: last
       ? {
           id: last.id,
@@ -101,7 +98,8 @@ export function assembleHealth(args: {
           source_used: last.source_used,
           latency_ms: last.latency_ms,
           fleet_status: last.fleet_status,
-          graphql_status: last.graphql_status,
+          google_status: last.google_status,
+          google_requests: last.google_requests,
           error: last.error,
         }
       : null,
@@ -113,10 +111,7 @@ export async function healthPayload(env: Env, now = new Date(), windowHours = 24
   const hours = Math.min(168, Math.max(1, windowHours));
   const config = loadConfig(env);
   const sinceIso = new Date(now.getTime() - hours * 60 * 60 * 1000).toISOString();
-  const [stats, markers] = await Promise.all([
-    collectionStatsSince(env.DB, sinceIso),
-    readCollectorMarkers(env.KV),
-  ]);
+  const stats = await collectionStatsSince(env.DB, sinceIso);
   return assembleHealth({
     windowHours: hours,
     intervalMinutes: config.collectionIntervalMinutes,
@@ -124,8 +119,7 @@ export async function healthPayload(env: Env, now = new Date(), windowHours = 24
     sinceIso,
     stats,
     mode: config.collectorMode,
-    graphqlOn: graphqlEnabled(config.collectorMode),
+    googleOn: googleEnabled(config.collectorMode),
     bbox: config.bbox,
-    markers,
   });
 }

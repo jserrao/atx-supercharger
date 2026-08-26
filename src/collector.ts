@@ -1,19 +1,18 @@
-import { graphqlEnabled, loadConfig } from "./config";
-import { cadenceBucket, lockTtlSeconds, shouldRunDual } from "./cadence";
+import { googleEnabled, loadConfig } from "./config";
+import { cadenceBucket, lockTtlSeconds } from "./cadence";
 import { logError, logInfo } from "./log";
 import { filterToBbox } from "./observations";
 import { fetchNearbyChargingSites, fetchVehicleList } from "./providers/fleet";
-import { fetchGraphqlNearbySites } from "./providers/graphql";
+import { fetchGoogleNearbySites } from "./providers/google";
 import {
+  claimPollRun,
   completePollRun,
-  getPollRunByScheduledAt,
   insertComparisons,
-  insertPollRun,
   insertRawResponse,
+  lastGoogleAttemptAt,
   persistObservations,
   pruneRawResponses,
 } from "./storage/d1";
-import { acquireLock, recordSuccess, releaseLock } from "./storage/kv";
 import { haversineMeters, namesReasonablyMatch } from "./geo";
 import { sanitizeRaw } from "./redact";
 import type {
@@ -28,7 +27,7 @@ import type {
 export type CollectOptions = {
   now?: Date;
   force?: boolean;
-  forceSource?: "fleet" | "graphql" | "auto";
+  forceSource?: "fleet" | "google" | "auto";
 };
 
 function sleep(ms: number): Promise<void> {
@@ -51,41 +50,50 @@ async function retry5xx(run: () => Promise<ProviderResult>): Promise<ProviderRes
   const first = await run();
   if (first.status < 500) return first;
   await sleep(jitterDelay());
-  return run();
+  const second = await run();
+  return {
+    ...second,
+    requestCount: (first.requestCount ?? 0) + (second.requestCount ?? 0),
+  };
 }
 
 function effectiveMode(config: AppConfig, forceSource?: CollectOptions["forceSource"]): CollectorMode {
   if (forceSource === "fleet") return "fleet_only";
-  if (forceSource === "graphql") return "auto";
+  if (forceSource === "google") return "auto";
   if (forceSource === "auto") return "auto";
   return config.collectorMode;
 }
 
+function googleDue(lastAttemptIso: string | null, fallbackMinutes: number, now: Date): boolean {
+  if (!lastAttemptIso) return true;
+  const last = Date.parse(lastAttemptIso);
+  if (!Number.isFinite(last)) return true;
+  return now.getTime() - last >= fallbackMinutes * 60_000;
+}
+
 function buildComparisons(
   fleet: ChargerObservation[],
-  graphql: ChargerObservation[],
+  google: ChargerObservation[],
   matchDistanceMeters: number,
 ): SourceComparison[] {
   return fleet.map((fleetObs) => {
-    const match = graphql.find((graphqlObs) => {
+    const match = google.find((googleObs) => {
       const distance = haversineMeters(
         fleetObs.latitude,
         fleetObs.longitude,
-        graphqlObs.latitude,
-        graphqlObs.longitude,
+        googleObs.latitude,
+        googleObs.longitude,
       );
-      return distance <= matchDistanceMeters && namesReasonablyMatch(fleetObs.name, graphqlObs.name);
+      return distance <= matchDistanceMeters && namesReasonablyMatch(fleetObs.name, googleObs.name);
     });
     const fleetAvailable = fleetObs.availableStalls;
-    const graphqlAvailable = match?.availableStalls ?? null;
+    const googleAvailable = match?.availableStalls ?? null;
     return {
       stationId: null,
       fleetAvailable,
-      graphqlAvailable,
+      googleAvailable,
       availableDelta:
-        fleetAvailable != null && graphqlAvailable != null
-          ? graphqlAvailable - fleetAvailable
-          : null,
+        fleetAvailable != null && googleAvailable != null ? googleAvailable - fleetAvailable : null,
       congestionAgeDeltaSeconds:
         fleetObs.congestionAgeSeconds != null && match?.congestionAgeSeconds != null
           ? match.congestionAgeSeconds - fleetObs.congestionAgeSeconds
@@ -93,6 +101,130 @@ function buildComparisons(
       identityMatch: Boolean(match),
     };
   });
+}
+
+type GoogleHandle = {
+  status: PollStatus;
+  error: string | null;
+  sampleCount: number;
+  persisted: ChargerObservation[];
+  sourceUsed: string | null;
+  googleStatus: number | null;
+  googleRequests: number;
+};
+
+async function handleGoogleResult(
+  env: Env,
+  config: AppConfig,
+  pollRunId: string,
+  scheduledAt: string,
+  google: ProviderResult,
+  fallbackReason: PollStatus,
+): Promise<Omit<GoogleHandle, "googleStatus" | "googleRequests">> {
+  if (google.error === "google_auth_failure" || google.status === 401 || google.status === 403) {
+    return {
+      status: "google_auth_failure",
+      error: google.error,
+      sampleCount: 0,
+      persisted: [],
+      sourceUsed: null,
+    };
+  }
+  if (google.status === 429) {
+    return {
+      status: "google_rate_limited",
+      error: "google_rate_limited",
+      sampleCount: 0,
+      persisted: [],
+      sourceUsed: null,
+    };
+  }
+  if (!google.ok) {
+    return {
+      status: "google_error",
+      error: google.error ?? fallbackReason,
+      sampleCount: 0,
+      persisted: [],
+      sourceUsed: null,
+    };
+  }
+
+  const inBbox = filterToBbox(google.observations, config.bbox);
+  if (inBbox.length === 0) {
+    return {
+      status: fallbackReason === "fleet_out_of_region" ? "no_data" : fallbackReason,
+      error: "google_no_in_bbox_superchargers",
+      sampleCount: 0,
+      persisted: [],
+      sourceUsed: "google",
+    };
+  }
+
+  const saved = await persistObservations(env.DB, config, pollRunId, scheduledAt, inBbox);
+  if (saved.sampleCount === 0) {
+    return {
+      status: fallbackReason === "fleet_out_of_region" ? "no_data" : fallbackReason,
+      error: "google_no_matched_stations",
+      sampleCount: 0,
+      persisted: [],
+      sourceUsed: "google",
+    };
+  }
+  return {
+    status: "success",
+    error: null,
+    sampleCount: saved.sampleCount,
+    persisted: inBbox,
+    sourceUsed: "google",
+  };
+}
+
+async function collectFromGoogle(
+  env: Env,
+  config: AppConfig,
+  pollRunId: string,
+  scheduledAt: string,
+  startedAt: string,
+  vin: string,
+  fallbackReason: PollStatus,
+  options: { bypassCooldown: boolean; now: Date; persist: boolean },
+): Promise<GoogleHandle> {
+  if (!options.bypassCooldown) {
+    const lastAttempt = await lastGoogleAttemptAt(env.DB);
+    if (!googleDue(lastAttempt, config.googleFallbackMinutes, options.now)) {
+      return {
+        status: "google_cooldown",
+        error: null,
+        sampleCount: 0,
+        persisted: [],
+        sourceUsed: null,
+        googleStatus: null,
+        googleRequests: 0,
+      };
+    }
+  }
+
+  const google = await retry5xx(() => fetchGoogleNearbySites(env, config, startedAt));
+  const googleRequests = google.requestCount ?? 1;
+  await insertRawResponse(env.DB, pollRunId, "google", startedAt, sanitizeRaw(google.raw, vin));
+  if (!options.persist) {
+    const inBbox = google.ok ? filterToBbox(google.observations, config.bbox) : [];
+    return {
+      status: google.ok ? "success" : "google_error",
+      error: google.error,
+      sampleCount: 0,
+      persisted: inBbox,
+      sourceUsed: null,
+      googleStatus: google.status,
+      googleRequests,
+    };
+  }
+  const handled = await handleGoogleResult(env, config, pollRunId, scheduledAt, google, fallbackReason);
+  return {
+    ...handled,
+    googleStatus: google.status,
+    googleRequests,
+  };
 }
 
 export async function runCollection(env: Env, options: CollectOptions = {}): Promise<Record<string, unknown>> {
@@ -104,60 +236,64 @@ export async function runCollection(env: Env, options: CollectOptions = {}): Pro
   const mode = effectiveMode(config, options.forceSource);
   const startedMs = Date.now();
 
-  const existing = await getPollRunByScheduledAt(env.DB, scheduledAt);
-  if (existing?.completed_at && !options.force) {
-    return {
-      status: "lock_skipped",
-      poll_run_id: existing.id,
-      scheduled_at: scheduledAt,
-      reason: "bucket_already_completed",
-    };
-  }
-
-  const locked = await acquireLock(env.KV, scheduledAt, lockTtlSeconds(config.collectionIntervalMinutes));
-  if (!locked && !options.force) {
-    return { status: "lock_skipped", scheduled_at: scheduledAt, reason: "lock_held" };
-  }
-
-  const createdId = existing?.id ?? crypto.randomUUID();
-  if (!existing) {
-    await insertPollRun(env.DB, {
-      id: createdId,
+  const claimed = await claimPollRun(
+    env.DB,
+    {
+      id: crypto.randomUUID(),
       scheduled_at: scheduledAt,
       started_at: startedAt,
       status: "success",
-    });
+    },
+    {
+      force: Boolean(options.force),
+      lockTtlSeconds: lockTtlSeconds(config.collectionIntervalMinutes),
+      now,
+    },
+  );
+  if (claimed.skipped && !options.force) {
+    return {
+      status: "lock_skipped",
+      poll_run_id: claimed.id,
+      scheduled_at: scheduledAt,
+      reason: claimed.skipped,
+    };
   }
-  const persistedRun = await getPollRunByScheduledAt(env.DB, scheduledAt);
-  const pollRunId = persistedRun?.id ?? createdId;
+  const pollRunId = claimed.id;
 
   let vehicleState: string | null = null;
   let sourceUsed: string | null = null;
   let fleetStatus: number | null = null;
-  let graphqlStatus: number | null = null;
+  let googleStatus: number | null = null;
+  let googleRequests = 0;
   let status: PollStatus = "no_data";
   let error: string | null = null;
   let sampleCount = 0;
   let persisted: ChargerObservation[] = [];
 
+  const finishGoogle = (result: GoogleHandle) => {
+    status = result.status;
+    error = result.error;
+    sampleCount = result.sampleCount;
+    persisted = result.persisted;
+    sourceUsed = result.sourceUsed;
+    googleStatus = result.googleStatus;
+    googleRequests += result.googleRequests;
+  };
+
   try {
-    if (options.forceSource === "graphql") {
-      const graphql = await retry5xx(() => fetchGraphqlNearbySites(env, config, startedAt));
-      graphqlStatus = graphql.status;
-      await insertRawResponse(
-        env.DB,
-        pollRunId,
-        "graphql",
-        startedAt,
-        sanitizeRaw(graphql.raw, vin),
+    if (options.forceSource === "google") {
+      finishGoogle(
+        await collectFromGoogle(
+          env,
+          config,
+          pollRunId,
+          scheduledAt,
+          startedAt,
+          vin,
+          "google_error",
+          { bypassCooldown: true, now, persist: true },
+        ),
       );
-      ({ status, error, sampleCount, persisted, sourceUsed } = await handleGraphqlOnly(
-        env,
-        config,
-        pollRunId,
-        scheduledAt,
-        graphql,
-      ));
     } else {
       const { result: vehiclesResult, vehicle } = await fetchVehicleList(env, config);
       vehicleState = vehicle?.state ?? null;
@@ -171,47 +307,23 @@ export async function runCollection(env: Env, options: CollectOptions = {}): Pro
       } else if (!vehiclesResult.ok) {
         status = "fleet_error";
         error = asError(vehiclesResult.data) ?? `vehicles_http_${vehiclesResult.status}`;
-        if (graphqlEnabled(mode)) {
-          const fallback = await retry5xx(() => fetchGraphqlNearbySites(env, config, startedAt));
-          graphqlStatus = fallback.status;
-          await insertRawResponse(
-            env.DB,
-            pollRunId,
-            "graphql",
-            startedAt,
-            sanitizeRaw(fallback.raw, vin),
-          );
-          ({ status, error, sampleCount, persisted, sourceUsed } = await handleGraphqlFallback(
-            env,
-            config,
-            pollRunId,
-            scheduledAt,
-            fallback,
-            "fleet_error",
-          ));
-        }
       } else if (!vehicle) {
         status = "fleet_error";
         error = "vehicle_not_found";
       } else if (options.forceSource !== "fleet" && vehicleState && vehicleState !== "online") {
-        if (graphqlEnabled(mode)) {
-          const graphql = await retry5xx(() => fetchGraphqlNearbySites(env, config, startedAt));
-          graphqlStatus = graphql.status;
-          await insertRawResponse(
-            env.DB,
-            pollRunId,
-            "graphql",
-            startedAt,
-            sanitizeRaw(graphql.raw, vin),
+        if (googleEnabled(mode)) {
+          finishGoogle(
+            await collectFromGoogle(
+              env,
+              config,
+              pollRunId,
+              scheduledAt,
+              startedAt,
+              vin,
+              "fleet_vehicle_offline",
+              { bypassCooldown: false, now, persist: true },
+            ),
           );
-          ({ status, error, sampleCount, persisted, sourceUsed } = await handleGraphqlFallback(
-            env,
-            config,
-            pollRunId,
-            scheduledAt,
-            graphql,
-            "fleet_vehicle_offline",
-          ));
         } else {
           status = "fleet_vehicle_offline";
           error = `vehicle_${vehicleState}`;
@@ -228,13 +340,6 @@ export async function runCollection(env: Env, options: CollectOptions = {}): Pro
           fleetStatus = fleet.status;
           await insertRawResponse(env.DB, pollRunId, "fleet", startedAt, sanitizeRaw(fleet.raw, vin));
 
-          const needGraphql =
-            !fleet.ok ||
-            fleet.status === 408 ||
-            fleet.status === 429 ||
-            fleet.status >= 500 ||
-            filterToBbox(fleet.observations, config.bbox).length === 0;
-
           if (fleet.ok) {
             const inBbox = filterToBbox(fleet.observations, config.bbox);
             if (inBbox.length > 0) {
@@ -249,71 +354,62 @@ export async function runCollection(env: Env, options: CollectOptions = {}): Pro
               persisted = inBbox;
               sourceUsed = "fleet";
               status = "success";
-              await recordSuccess(env.KV, "fleet", startedAt);
             }
           }
+
+          const needGoogle =
+            sampleCount === 0 &&
+            (fleet.status === 408 || (fleet.ok && filterToBbox(fleet.observations, config.bbox).length === 0));
 
           if (fleet.status === 429 && sampleCount === 0) {
             status = "rate_limited";
             error = "fleet_rate_limited";
-          } else if (needGraphql && sampleCount === 0) {
-            if (graphqlEnabled(mode)) {
-              const graphql = await retry5xx(() => fetchGraphqlNearbySites(env, config, startedAt));
-              graphqlStatus = graphql.status;
-              await insertRawResponse(
-                env.DB,
-                pollRunId,
-                "graphql",
-                startedAt,
-                sanitizeRaw(graphql.raw, vin),
+          } else if (needGoogle && sampleCount === 0) {
+            const reason: PollStatus = fleet.status === 408 ? "fleet_vehicle_offline" : "fleet_out_of_region";
+            if (googleEnabled(mode)) {
+              finishGoogle(
+                await collectFromGoogle(
+                  env,
+                  config,
+                  pollRunId,
+                  scheduledAt,
+                  startedAt,
+                  vin,
+                  reason,
+                  { bypassCooldown: false, now, persist: true },
+                ),
               );
-              const reason: PollStatus = !fleet.ok
-                ? fleet.status === 408
-                  ? "fleet_vehicle_offline"
-                  : "fleet_error"
-                : "fleet_out_of_region";
-              ({ status, error, sampleCount, persisted, sourceUsed } = await handleGraphqlFallback(
-                env,
-                config,
-                pollRunId,
-                scheduledAt,
-                graphql,
-                reason,
-              ));
             } else if (fleet.ok) {
               status = "fleet_out_of_region";
               error = "no_in_bbox_superchargers";
-            } else if (fleet.status === 408) {
+            } else {
               status = "fleet_vehicle_offline";
               error = fleet.error;
-            } else {
-              status = "fleet_error";
-              error = fleet.error;
             }
+          } else if (!fleet.ok && sampleCount === 0 && fleet.status !== 429) {
+            status = "fleet_error";
+            error = fleet.error;
           }
 
-          if (
-            mode === "dual" &&
-            sourceUsed === "fleet" &&
-            shouldRunDual(now) &&
-            graphqlEnabled(mode)
-          ) {
-            const graphql = await retry5xx(() => fetchGraphqlNearbySites(env, config, startedAt));
-            graphqlStatus = graphql.status;
-            await insertRawResponse(
-              env.DB,
+          if (mode === "dual" && sourceUsed === "fleet" && googleEnabled(mode)) {
+            const compare = await collectFromGoogle(
+              env,
+              config,
               pollRunId,
-              "graphql",
+              scheduledAt,
               startedAt,
-              sanitizeRaw(graphql.raw, vin),
+              vin,
+              "google_error",
+              { bypassCooldown: false, now, persist: false },
             );
-            if (graphql.ok) {
-              const graphqlInBbox = filterToBbox(graphql.observations, config.bbox);
+            googleStatus = compare.googleStatus;
+            googleRequests += compare.googleRequests;
+            if (compare.status === "success" || compare.persisted.length > 0) {
               await insertComparisons(
                 env.DB,
                 pollRunId,
                 startedAt,
-                buildComparisons(persisted, graphqlInBbox, config.matchDistanceMeters),
+                buildComparisons(persisted, compare.persisted, config.matchDistanceMeters),
               );
             }
           }
@@ -327,7 +423,9 @@ export async function runCollection(env: Env, options: CollectOptions = {}): Pro
       vehicleState,
       sourceUsed,
       fleetStatus,
-      graphqlStatus,
+      graphqlStatus: null,
+      googleStatus,
+      googleRequests,
       sampleCount,
       latencyMs: Date.now() - startedMs,
       status,
@@ -343,7 +441,8 @@ export async function runCollection(env: Env, options: CollectOptions = {}): Pro
       sample_count: sampleCount,
       vehicle_state: vehicleState,
       fleet_status: fleetStatus,
-      graphql_status: graphqlStatus,
+      google_status: googleStatus,
+      google_requests: googleRequests,
       latency_ms: Date.now() - startedMs,
     });
 
@@ -355,7 +454,8 @@ export async function runCollection(env: Env, options: CollectOptions = {}): Pro
       sample_count: sampleCount,
       vehicle_state: vehicleState,
       fleet_status: fleetStatus,
-      graphql_status: graphqlStatus,
+      google_status: googleStatus,
+      google_requests: googleRequests,
       error,
     };
   } catch (caught) {
@@ -366,7 +466,9 @@ export async function runCollection(env: Env, options: CollectOptions = {}): Pro
       vehicleState,
       sourceUsed,
       fleetStatus,
-      graphqlStatus,
+      graphqlStatus: null,
+      googleStatus,
+      googleRequests,
       sampleCount,
       latencyMs: Date.now() - startedMs,
       status: "fleet_error",
@@ -378,87 +480,5 @@ export async function runCollection(env: Env, options: CollectOptions = {}): Pro
       status: "fleet_error",
       error: message,
     };
-  } finally {
-    await releaseLock(env.KV, scheduledAt);
   }
-}
-
-async function handleGraphqlOnly(
-  env: Env,
-  config: AppConfig,
-  pollRunId: string,
-  scheduledAt: string,
-  graphql: ProviderResult,
-): Promise<{
-  status: PollStatus;
-  error: string | null;
-  sampleCount: number;
-  persisted: ChargerObservation[];
-  sourceUsed: string | null;
-}> {
-  return handleGraphqlFallback(env, config, pollRunId, scheduledAt, graphql, "graphql_error");
-}
-
-async function handleGraphqlFallback(
-  env: Env,
-  config: AppConfig,
-  pollRunId: string,
-  scheduledAt: string,
-  graphql: ProviderResult,
-  fallbackReason: PollStatus,
-): Promise<{
-  status: PollStatus;
-  error: string | null;
-  sampleCount: number;
-  persisted: ChargerObservation[];
-  sourceUsed: string | null;
-}> {
-  if (graphql.error === "graphql_auth_failure" || graphql.status === 401 || graphql.status === 403) {
-    return {
-      status: "graphql_auth_failure",
-      error: graphql.error,
-      sampleCount: 0,
-      persisted: [],
-      sourceUsed: null,
-    };
-  }
-  if (graphql.status === 429) {
-    return {
-      status: "rate_limited",
-      error: "graphql_rate_limited",
-      sampleCount: 0,
-      persisted: [],
-      sourceUsed: null,
-    };
-  }
-  if (!graphql.ok) {
-    return {
-      status: graphqlEnabled(config.collectorMode) ? "graphql_error" : fallbackReason,
-      error: graphql.error ?? fallbackReason,
-      sampleCount: 0,
-      persisted: [],
-      sourceUsed: null,
-    };
-  }
-
-  const inBbox = filterToBbox(graphql.observations, config.bbox);
-  if (inBbox.length === 0) {
-    return {
-      status: fallbackReason === "fleet_out_of_region" ? "no_data" : fallbackReason,
-      error: "graphql_no_in_bbox_superchargers",
-      sampleCount: 0,
-      persisted: [],
-      sourceUsed: "graphql",
-    };
-  }
-
-  const saved = await persistObservations(env.DB, config, pollRunId, scheduledAt, inBbox);
-  await recordSuccess(env.KV, "graphql", inBbox[0]?.observedAt ?? new Date().toISOString());
-  return {
-    status: "success",
-    error: null,
-    sampleCount: saved.sampleCount,
-    persisted: inBbox,
-    sourceUsed: "graphql",
-  };
 }

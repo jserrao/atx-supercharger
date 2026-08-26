@@ -125,6 +125,7 @@ export async function fetchNearbyChargingSites(
       observations: [],
       raw: result.data,
       error: errorMessage(result.data) ?? `fleet_http_${result.status}`,
+      requestCount: 1,
     };
   }
   return {
@@ -134,6 +135,7 @@ export async function fetchNearbyChargingSites(
     observations: normalizeFleetSites(result.data, observedAt),
     raw: result.data,
     error: null,
+    requestCount: 1,
   };
 }
 

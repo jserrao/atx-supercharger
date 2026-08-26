@@ -7,6 +7,7 @@ function station(overrides: Partial<StationRecord>): StationRecord {
     id: "station-1",
     fleet_id: "111",
     graphql_id: null,
+    google_place_id: null,
     name: "Bee Cave",
     latitude: 30.306,
     longitude: -97.952,
@@ -103,5 +104,67 @@ describe("station matching", () => {
       150,
     );
     expect(match).toBeNull();
+  });
+
+  it("matches a generic Tesla Supercharger name to the only nearby station", () => {
+    const match = matchStation(
+      [station()],
+      observation({
+        source: "google",
+        sourceStationId: "ChIJ-generic",
+        name: "Tesla Supercharger",
+      }),
+      150,
+    );
+    expect(match?.method).toBe("geo_name");
+    expect(match?.existing.id).toBe("station-1");
+  });
+
+  it("matches a Google Place ID and attaches it on geo+name", () => {
+    const byId = matchStation(
+      [station({ google_place_id: "ChIJ-1", name: "Other" })],
+      observation({ source: "google", sourceStationId: "ChIJ-1" }),
+      150,
+    );
+    expect(byId?.method).toBe("source_id");
+
+    const geo = matchStation(
+      [station()],
+      observation({
+        source: "google",
+        sourceStationId: "ChIJ-bee",
+        name: "Tesla Supercharger Bee Cave",
+      }),
+      150,
+    );
+    expect(geo?.method).toBe("geo_name");
+
+    const attached = applyObservationToStation(
+      station(),
+      observation({
+        source: "google",
+        sourceStationId: "ChIJ-bee",
+        name: "Tesla Supercharger Bee Cave",
+      }),
+      "2026-08-24T01:00:00.000Z",
+      "geo_name",
+    );
+    expect(attached.google_place_id).toBe("ChIJ-bee");
+    expect(attached.fleet_id).toBe("111");
+  });
+
+  it("does not overwrite a Tesla display name with a generic Google label", () => {
+    const attached = applyObservationToStation(
+      station(),
+      observation({
+        source: "google",
+        sourceStationId: "ChIJ-generic",
+        name: "Tesla Supercharger",
+      }),
+      "2026-08-24T01:00:00.000Z",
+      "geo_name",
+    );
+    expect(attached.name).toBe("Bee Cave");
+    expect(attached.google_place_id).toBe("ChIJ-generic");
   });
 });

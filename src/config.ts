@@ -10,14 +10,18 @@ function mode(value: string | undefined): CollectorMode {
   return "fleet_only";
 }
 
+function flag(value: string | undefined): boolean {
+  return String(value ?? "").trim().toLowerCase() === "true";
+}
+
 export function loadConfig(env: Env): AppConfig {
   return {
     collectionIntervalMinutes: Math.max(1, num(env.COLLECTION_INTERVAL_MINUTES, 5)),
     bbox: {
-      north: num(env.GRAPHQL_NORTH, 30.5),
-      south: num(env.GRAPHQL_SOUTH, 30.0),
-      west: num(env.GRAPHQL_WEST, -98.25),
-      east: num(env.GRAPHQL_EAST, -97.7),
+      north: num(env.BBOX_NORTH, 30.5),
+      south: num(env.BBOX_SOUTH, 30.0),
+      west: num(env.BBOX_WEST, -98.25),
+      east: num(env.BBOX_EAST, -97.7),
     },
     fleetCount: Math.max(1, num(env.FLEET_COUNT, 50)),
     fleetRadius: Math.max(1, num(env.FLEET_RADIUS, 80)),
@@ -25,6 +29,9 @@ export function loadConfig(env: Env): AppConfig {
     matchDistanceMeters: Math.max(1, num(env.MATCH_DISTANCE_METERS, 150)),
     rawRetentionDays: Math.max(1, num(env.RAW_RETENTION_DAYS, 14)),
     collectorMode: mode(env.COLLECTOR_MODE),
+    googleFallbackMinutes: Math.max(1, num(env.GOOGLE_FALLBACK_MINUTES, 60)),
+    googleDiscovery: flag(env.GOOGLE_DISCOVERY),
+    googlePlacesApiKey: String(env.GOOGLE_MAPS_API_KEY ?? "").trim(),
     teslaAudience: env.TESLA_AUDIENCE,
     teslaRedirectUri: env.TESLA_REDIRECT_URI,
     teslaVin: String(env.TESLA_VIN ?? "").trim(),
@@ -35,6 +42,6 @@ export function loadConfig(env: Env): AppConfig {
   };
 }
 
-export function graphqlEnabled(mode: CollectorMode): boolean {
+export function googleEnabled(mode: CollectorMode): boolean {
   return mode === "auto" || mode === "dual";
 }

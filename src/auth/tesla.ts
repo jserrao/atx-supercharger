@@ -12,6 +12,8 @@ type TokenBlob = {
   expires_at: number;
 };
 
+let memoryTokens: TokenBlob | null = null;
+
 async function readJson<T>(kv: KVNamespace, key: string, fallback: T): Promise<T> {
   const raw = await kv.get(key);
   if (!raw) return fallback;
@@ -25,6 +27,10 @@ async function readJson<T>(kv: KVNamespace, key: string, fallback: T): Promise<T
 export function pemFromEnv(value: string | undefined): string {
   if (!value) return "";
   return `${String(value).replace(/\\n/g, "\n").trim()}\n`;
+}
+
+export function clearTokenCache(): void {
+  memoryTokens = null;
 }
 
 async function teslaTokenRequest(
@@ -66,6 +72,7 @@ export async function saveTokens(
     scope: String(payload.scope ?? TESLA_SCOPES),
     expires_at: Date.now() + Math.max(expiresIn - 60, 30) * 1000,
   };
+  memoryTokens = tokens;
   await env.KV.put(TOKEN_KEY, JSON.stringify(tokens));
   logInfo(config.teslaVin, { message: "tesla tokens saved", expires_at: tokens.expires_at });
   return tokens;
@@ -76,8 +83,19 @@ export async function getAccessToken(
   config: AppConfig,
   forceRefresh = false,
 ): Promise<string | null> {
-  const tokens = await readJson<TokenBlob | null>(env.KV, TOKEN_KEY, null);
-  if (!tokens?.access_token) return null;
+  if (!forceRefresh && memoryTokens?.access_token && memoryTokens.expires_at > Date.now()) {
+    return memoryTokens.access_token;
+  }
+
+  const tokens =
+    !forceRefresh && memoryTokens
+      ? memoryTokens
+      : await readJson<TokenBlob | null>(env.KV, TOKEN_KEY, null);
+  if (!tokens?.access_token) {
+    memoryTokens = null;
+    return null;
+  }
+  memoryTokens = tokens;
   if (!forceRefresh && tokens.expires_at > Date.now()) return tokens.access_token;
   if (!tokens.refresh_token) return forceRefresh ? null : tokens.access_token;
 
@@ -144,53 +162,6 @@ export async function teslaGet(
     status: response.status,
     method: "GET",
     path,
-    data,
-  };
-}
-
-export async function teslaPost(
-  env: Env,
-  config: AppConfig,
-  url: string,
-  body: unknown,
-  retried = false,
-): Promise<TeslaHttpResult> {
-  const accessToken = await getAccessToken(env, config);
-  if (!accessToken) {
-    return {
-      ok: false,
-      status: 401,
-      method: "POST",
-      path: url,
-      data: { error: "not_connected" },
-    };
-  }
-
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${accessToken}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-  let data: unknown = null;
-  try {
-    data = await response.json();
-  } catch {
-    data = { error: "non_json_response" };
-  }
-
-  if (response.status === 401 && !retried) {
-    const refreshed = await getAccessToken(env, config, true);
-    if (refreshed) return teslaPost(env, config, url, body, true);
-  }
-
-  return {
-    ok: response.ok,
-    status: response.status,
-    method: "POST",
-    path: url,
     data,
   };
 }

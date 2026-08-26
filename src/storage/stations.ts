@@ -1,5 +1,5 @@
 import type { ChargerObservation, StationRecord } from "../types";
-import { haversineMeters, namesReasonablyMatch } from "../geo";
+import { haversineMeters, namesReasonablyMatch, normalizeStationName } from "../geo";
 
 export type StationMatch = {
   station: StationRecord;
@@ -7,8 +7,12 @@ export type StationMatch = {
   created: boolean;
 };
 
-function sourceColumn(source: ChargerObservation["source"]): "fleet_id" | "graphql_id" {
-  return source === "fleet" ? "fleet_id" : "graphql_id";
+function sourceColumn(
+  source: ChargerObservation["source"],
+): "fleet_id" | "graphql_id" | "google_place_id" {
+  if (source === "fleet") return "fleet_id";
+  if (source === "google") return "google_place_id";
+  return "graphql_id";
 }
 
 export function matchStation(
@@ -32,6 +36,11 @@ export function matchStation(
 
   const named = nearby.find((station) => namesReasonablyMatch(station.name, observation.name));
   if (named) return { existing: named, method: "geo_name" };
+
+  const generic = !normalizeStationName(observation.name);
+  if (generic && nearby.length === 1 && nearby[0]) {
+    return { existing: nearby[0], method: "geo_name" };
+  }
   return null;
 }
 
@@ -47,6 +56,7 @@ export function applyObservationToStation(
       id: crypto.randomUUID(),
       fleet_id: observation.source === "fleet" ? observation.sourceStationId : null,
       graphql_id: observation.source === "graphql" ? observation.sourceStationId : null,
+      google_place_id: observation.source === "google" ? observation.sourceStationId : null,
       name: observation.name,
       latitude: observation.latitude,
       longitude: observation.longitude,
@@ -65,10 +75,14 @@ export function applyObservationToStation(
     };
   }
 
+  const nextName = normalizeStationName(observation.name)
+    ? observation.name || existing.name
+    : existing.name;
+
   return {
     ...existing,
     [column]: existing[column] ?? observation.sourceStationId,
-    name: observation.name || existing.name,
+    name: nextName,
     latitude: existing.latitude,
     longitude: existing.longitude,
     total_stalls: observation.totalStalls ?? existing.total_stalls,

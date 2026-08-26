@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cadenceBucket, shouldRunDual } from "./cadence";
+import { cadenceBucket } from "./cadence";
 
 describe("cadence", () => {
   it("truncates to the 5-minute bucket", () => {
@@ -11,9 +11,4 @@ describe("cadence", () => {
     );
   });
 
-  it("runs dual validation on :00 and :30 UTC", () => {
-    expect(shouldRunDual(new Date("2026-08-24T12:00:00.000Z"))).toBe(true);
-    expect(shouldRunDual(new Date("2026-08-24T12:30:00.000Z"))).toBe(true);
-    expect(shouldRunDual(new Date("2026-08-24T12:05:00.000Z"))).toBe(false);
-  });
 });

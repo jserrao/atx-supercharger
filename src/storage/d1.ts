@@ -11,91 +11,27 @@ export type PollRunRow = {
   source_used: string | null;
   fleet_status: number | null;
   graphql_status: number | null;
+  google_status: number | null;
+  google_requests: number | null;
   sample_count: number;
   latency_ms: number | null;
   status: string;
   error: string | null;
 };
 
-export async function listStations(db: D1Database): Promise<StationRecord[]> {
-  const result = await db.prepare("SELECT * FROM stations").all<StationRecord>();
-  return result.results ?? [];
-}
+const STATION_COLUMNS = `id, fleet_id, graphql_id, google_place_id, name, latitude, longitude, total_stalls,
+         max_power_kw, hardware_generation, amenities, match_method, first_seen_at, last_seen_at`;
 
-export async function insertPollRun(
-  db: D1Database,
-  row: Pick<PollRunRow, "id" | "scheduled_at" | "started_at" | "status">,
-): Promise<void> {
-  await db
-    .prepare(
-      `INSERT INTO poll_runs (id, scheduled_at, started_at, status, sample_count)
-       VALUES (?, ?, ?, ?, 0)
-       ON CONFLICT(scheduled_at) DO UPDATE SET
-         started_at = excluded.started_at,
-         status = excluded.status,
-         error = NULL`,
-    )
-    .bind(row.id, row.scheduled_at, row.started_at, row.status)
-    .run();
-}
-
-export async function getPollRunByScheduledAt(
-  db: D1Database,
-  scheduledAt: string,
-): Promise<PollRunRow | null> {
+function bindStation(db: D1Database, station: StationRecord): D1PreparedStatement {
   return db
-    .prepare("SELECT * FROM poll_runs WHERE scheduled_at = ?")
-    .bind(scheduledAt)
-    .first<PollRunRow>();
-}
-
-export async function completePollRun(
-  db: D1Database,
-  id: string,
-  fields: {
-    completedAt: string;
-    vehicleState: string | null;
-    sourceUsed: string | null;
-    fleetStatus: number | null;
-    graphqlStatus: number | null;
-    sampleCount: number;
-    latencyMs: number;
-    status: PollStatus;
-    error: string | null;
-  },
-): Promise<void> {
-  await db
-    .prepare(
-      `UPDATE poll_runs
-       SET completed_at = ?, vehicle_state = ?, source_used = ?, fleet_status = ?,
-           graphql_status = ?, sample_count = ?, latency_ms = ?, status = ?, error = ?
-       WHERE id = ?`,
-    )
-    .bind(
-      fields.completedAt,
-      fields.vehicleState,
-      fields.sourceUsed,
-      fields.fleetStatus,
-      fields.graphqlStatus,
-      fields.sampleCount,
-      fields.latencyMs,
-      fields.status,
-      fields.error,
-      id,
-    )
-    .run();
-}
-
-export async function upsertStation(db: D1Database, station: StationRecord): Promise<void> {
-  await db
     .prepare(
       `INSERT INTO stations (
-         id, fleet_id, graphql_id, name, latitude, longitude, total_stalls,
-         max_power_kw, hardware_generation, amenities, match_method, first_seen_at, last_seen_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ${STATION_COLUMNS}
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          fleet_id = COALESCE(excluded.fleet_id, stations.fleet_id),
          graphql_id = COALESCE(excluded.graphql_id, stations.graphql_id),
+         google_place_id = COALESCE(excluded.google_place_id, stations.google_place_id),
          name = excluded.name,
          total_stalls = COALESCE(excluded.total_stalls, stations.total_stalls),
          max_power_kw = COALESCE(excluded.max_power_kw, stations.max_power_kw),
@@ -108,6 +44,7 @@ export async function upsertStation(db: D1Database, station: StationRecord): Pro
       station.id,
       station.fleet_id,
       station.graphql_id,
+      station.google_place_id,
       station.name,
       station.latitude,
       station.longitude,
@@ -118,8 +55,126 @@ export async function upsertStation(db: D1Database, station: StationRecord): Pro
       station.match_method,
       station.first_seen_at,
       station.last_seen_at,
+    );
+}
+
+export async function listStations(db: D1Database): Promise<StationRecord[]> {
+  const result = await db.prepare("SELECT * FROM stations").all<StationRecord>();
+  return result.results ?? [];
+}
+
+export async function getPollRunByScheduledAt(
+  db: D1Database,
+  scheduledAt: string,
+): Promise<PollRunRow | null> {
+  return db
+    .prepare("SELECT * FROM poll_runs WHERE scheduled_at = ?")
+    .bind(scheduledAt)
+    .first<PollRunRow>();
+}
+
+export async function claimPollRun(
+  db: D1Database,
+  row: { id: string; scheduled_at: string; started_at: string; status: string },
+  options: { force: boolean; lockTtlSeconds: number; now: Date },
+): Promise<{ id: string; skipped: "bucket_already_completed" | "lock_held" | null }> {
+  const existing = await getPollRunByScheduledAt(db, row.scheduled_at);
+  if (existing?.completed_at && !options.force) {
+    return { id: existing.id, skipped: "bucket_already_completed" };
+  }
+  if (existing && !existing.completed_at && !options.force) {
+    const started = Date.parse(existing.started_at);
+    if (
+      Number.isFinite(started) &&
+      options.now.getTime() - started < options.lockTtlSeconds * 1000
+    ) {
+      return { id: existing.id, skipped: "lock_held" };
+    }
+  }
+
+  if (!existing) {
+    await db
+      .prepare(
+        `INSERT INTO poll_runs (id, scheduled_at, started_at, status, sample_count, google_requests)
+         VALUES (?, ?, ?, ?, 0, 0)
+         ON CONFLICT(scheduled_at) DO NOTHING`,
+      )
+      .bind(row.id, row.scheduled_at, row.started_at, row.status)
+      .run();
+    const persisted = await getPollRunByScheduledAt(db, row.scheduled_at);
+    if (!persisted) return { id: row.id, skipped: "lock_held" };
+    if (persisted.id !== row.id && persisted.completed_at && !options.force) {
+      return { id: persisted.id, skipped: "bucket_already_completed" };
+    }
+    if (persisted.id !== row.id && !options.force) {
+      return { id: persisted.id, skipped: "lock_held" };
+    }
+    return { id: persisted.id, skipped: null };
+  }
+
+  await db
+    .prepare(
+      `UPDATE poll_runs
+       SET started_at = ?, status = ?, error = NULL, completed_at = NULL
+       WHERE scheduled_at = ?`,
+    )
+    .bind(row.started_at, row.status, row.scheduled_at)
+    .run();
+  return { id: existing.id, skipped: null };
+}
+
+export async function completePollRun(
+  db: D1Database,
+  id: string,
+  fields: {
+    completedAt: string;
+    vehicleState: string | null;
+    sourceUsed: string | null;
+    fleetStatus: number | null;
+    graphqlStatus: number | null;
+    googleStatus: number | null;
+    googleRequests: number;
+    sampleCount: number;
+    latencyMs: number;
+    status: PollStatus;
+    error: string | null;
+  },
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE poll_runs
+       SET completed_at = ?, vehicle_state = ?, source_used = ?, fleet_status = ?,
+           graphql_status = ?, google_status = ?, google_requests = ?, sample_count = ?,
+           latency_ms = ?, status = ?, error = ?
+       WHERE id = ?`,
+    )
+    .bind(
+      fields.completedAt,
+      fields.vehicleState,
+      fields.sourceUsed,
+      fields.fleetStatus,
+      fields.graphqlStatus,
+      fields.googleStatus,
+      fields.googleRequests,
+      fields.sampleCount,
+      fields.latencyMs,
+      fields.status,
+      fields.error,
+      id,
     )
     .run();
+}
+
+export async function lastGoogleAttemptAt(db: D1Database): Promise<string | null> {
+  const row = await db
+    .prepare(
+      `SELECT started_at FROM poll_runs
+       WHERE google_requests > 0
+       ORDER BY started_at DESC
+       LIMIT 1`,
+    )
+    .first<{ started_at: string }>();
+  return row?.started_at ?? null;
 }
 
 export async function persistObservations(
@@ -135,6 +190,9 @@ export async function persistObservations(
 
   for (const observation of observations) {
     const matched = matchStation(stations, observation, config.matchDistanceMeters);
+    if (!matched && observation.source === "google" && !config.googleDiscovery) {
+      continue;
+    }
     const method = matched?.method ?? "created";
     const station = applyObservationToStation(
       matched?.existing ?? null,
@@ -146,38 +204,7 @@ export async function persistObservations(
     if (existingIndex >= 0) stations[existingIndex] = station;
     else stations.push(station);
 
-    statements.push(
-      db.prepare(
-        `INSERT INTO stations (
-           id, fleet_id, graphql_id, name, latitude, longitude, total_stalls,
-           max_power_kw, hardware_generation, amenities, match_method, first_seen_at, last_seen_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET
-           fleet_id = COALESCE(excluded.fleet_id, stations.fleet_id),
-           graphql_id = COALESCE(excluded.graphql_id, stations.graphql_id),
-           name = excluded.name,
-           total_stalls = COALESCE(excluded.total_stalls, stations.total_stalls),
-           max_power_kw = COALESCE(excluded.max_power_kw, stations.max_power_kw),
-           hardware_generation = COALESCE(excluded.hardware_generation, stations.hardware_generation),
-           amenities = COALESCE(excluded.amenities, stations.amenities),
-           match_method = COALESCE(stations.match_method, excluded.match_method),
-           last_seen_at = excluded.last_seen_at`,
-      ).bind(
-        station.id,
-        station.fleet_id,
-        station.graphql_id,
-        station.name,
-        station.latitude,
-        station.longitude,
-        station.total_stalls,
-        station.max_power_kw,
-        station.hardware_generation,
-        station.amenities,
-        station.match_method,
-        station.first_seen_at,
-        station.last_seen_at,
-      ),
-    );
+    statements.push(bindStation(db, station));
 
     const stale = isStale(observation.congestionAgeSeconds, config.staleThresholdSeconds) ? 1 : 0;
     statements.push(
@@ -238,7 +265,7 @@ export async function persistObservations(
   }
 
   if (statements.length > 0) await db.batch(statements);
-  return { sampleCount: observations.length, stationIds };
+  return { sampleCount: stationIds.length, stationIds };
 }
 
 export async function insertRawResponse(
@@ -268,15 +295,16 @@ export async function insertComparisons(
     db
       .prepare(
         `INSERT INTO source_comparisons (
-           poll_run_id, station_id, fleet_available, graphql_available,
+           poll_run_id, station_id, fleet_available, graphql_available, google_available,
            available_delta, congestion_age_delta_seconds, identity_match, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         pollRunId,
         row.stationId,
         row.fleetAvailable,
-        row.graphqlAvailable,
+        null,
+        row.googleAvailable,
         row.availableDelta,
         row.congestionAgeDeltaSeconds,
         row.identityMatch ? 1 : 0,
@@ -296,7 +324,7 @@ export async function pruneRawResponses(
 }
 
 export type HttpErrorCount = {
-  source: "fleet" | "graphql";
+  source: "fleet" | "google";
   httpStatus: number;
   count: number;
 };
@@ -305,14 +333,19 @@ export type CollectionStats = {
   invocations: number;
   successfulPolls: number;
   fleetPolls: number;
-  graphqlPolls: number;
+  googlePolls: number;
   failedPolls: number;
   offlinePolls: number;
+  cooldownPolls: number;
   outOfRegionPolls: number;
   avgLatencyMs: number | null;
   avgStationsPerPoll: number | null;
   avgStationsWhenSampled: number | null;
+  googleRequests: number;
   firstScheduledAt: string | null;
+  lastSuccessAt: string | null;
+  lastFleetSuccessAt: string | null;
+  lastGoogleSuccessAt: string | null;
   last: PollRunRow | null;
   statusCounts: Record<string, number>;
   httpErrors: HttpErrorCount[];
@@ -326,21 +359,26 @@ function round1(value: number | null | undefined): number | null {
 }
 
 export async function collectionStatsSince(db: D1Database, sinceIso: string): Promise<CollectionStats> {
-  const [totals, statuses, fleetErrors, graphqlErrors, sampleCounts, last] = await Promise.all([
+  const [totals, statuses, fleetErrors, googleErrors, sampleCounts, last] = await Promise.all([
     db
       .prepare(
         `SELECT
            COUNT(*) AS invocations,
            SUM(CASE WHEN status IN ('success', 'partial_success') THEN 1 ELSE 0 END) AS successful_polls,
            SUM(CASE WHEN source_used = 'fleet' THEN 1 ELSE 0 END) AS fleet_polls,
-           SUM(CASE WHEN source_used = 'graphql' THEN 1 ELSE 0 END) AS graphql_polls,
-           SUM(CASE WHEN status IN ('fleet_error', 'graphql_error', 'graphql_auth_failure', 'rate_limited', 'not_connected', 'no_data') THEN 1 ELSE 0 END) AS failed_polls,
+           SUM(CASE WHEN source_used = 'google' THEN 1 ELSE 0 END) AS google_polls,
+           SUM(CASE WHEN status IN ('fleet_error', 'google_error', 'google_auth_failure', 'google_rate_limited', 'rate_limited', 'not_connected', 'no_data') THEN 1 ELSE 0 END) AS failed_polls,
            SUM(CASE WHEN status = 'fleet_vehicle_offline' THEN 1 ELSE 0 END) AS offline_polls,
+           SUM(CASE WHEN status = 'google_cooldown' THEN 1 ELSE 0 END) AS cooldown_polls,
            SUM(CASE WHEN status = 'fleet_out_of_region' THEN 1 ELSE 0 END) AS out_of_region_polls,
            AVG(latency_ms) AS avg_latency_ms,
            AVG(sample_count) AS avg_stations_per_poll,
            AVG(CASE WHEN sample_count > 0 THEN sample_count END) AS avg_stations_when_sampled,
-           MIN(scheduled_at) AS first_scheduled_at
+           SUM(COALESCE(google_requests, 0)) AS google_requests,
+           MIN(scheduled_at) AS first_scheduled_at,
+           MAX(CASE WHEN status IN ('success', 'partial_success') THEN completed_at END) AS last_success_at,
+           MAX(CASE WHEN source_used = 'fleet' THEN completed_at END) AS last_fleet_success_at,
+           MAX(CASE WHEN source_used = 'google' THEN completed_at END) AS last_google_success_at
          FROM poll_runs
          WHERE scheduled_at >= ?`,
       )
@@ -349,14 +387,19 @@ export async function collectionStatsSince(db: D1Database, sinceIso: string): Pr
         invocations: number;
         successful_polls: number;
         fleet_polls: number;
-        graphql_polls: number;
+        google_polls: number;
         failed_polls: number;
         offline_polls: number;
+        cooldown_polls: number;
         out_of_region_polls: number;
         avg_latency_ms: number | null;
         avg_stations_per_poll: number | null;
         avg_stations_when_sampled: number | null;
+        google_requests: number | null;
         first_scheduled_at: string | null;
+        last_success_at: string | null;
+        last_fleet_success_at: string | null;
+        last_google_success_at: string | null;
       }>(),
     db
       .prepare(
@@ -378,10 +421,10 @@ export async function collectionStatsSince(db: D1Database, sinceIso: string): Pr
       .all<{ http_status: number; n: number }>(),
     db
       .prepare(
-        `SELECT graphql_status AS http_status, COUNT(*) AS n
+        `SELECT google_status AS http_status, COUNT(*) AS n
          FROM poll_runs
-         WHERE scheduled_at >= ? AND graphql_status IS NOT NULL AND graphql_status >= 400
-         GROUP BY graphql_status`,
+         WHERE scheduled_at >= ? AND google_status IS NOT NULL AND google_status >= 400
+         GROUP BY google_status`,
       )
       .bind(sinceIso)
       .all<{ http_status: number; n: number }>(),
@@ -410,8 +453,8 @@ export async function collectionStatsSince(db: D1Database, sinceIso: string): Pr
       httpStatus: Number(row.http_status),
       count: Number(row.n) || 0,
     })),
-    ...(graphqlErrors.results ?? []).map((row) => ({
-      source: "graphql" as const,
+    ...(googleErrors.results ?? []).map((row) => ({
+      source: "google" as const,
       httpStatus: Number(row.http_status),
       count: Number(row.n) || 0,
     })),
@@ -421,14 +464,19 @@ export async function collectionStatsSince(db: D1Database, sinceIso: string): Pr
     invocations: Number(totals?.invocations) || 0,
     successfulPolls: Number(totals?.successful_polls) || 0,
     fleetPolls: Number(totals?.fleet_polls) || 0,
-    graphqlPolls: Number(totals?.graphql_polls) || 0,
+    googlePolls: Number(totals?.google_polls) || 0,
     failedPolls: Number(totals?.failed_polls) || 0,
     offlinePolls: Number(totals?.offline_polls) || 0,
+    cooldownPolls: Number(totals?.cooldown_polls) || 0,
     outOfRegionPolls: Number(totals?.out_of_region_polls) || 0,
     avgLatencyMs: round1(totals?.avg_latency_ms),
     avgStationsPerPoll: round1(totals?.avg_stations_per_poll),
     avgStationsWhenSampled: round1(totals?.avg_stations_when_sampled),
+    googleRequests: Number(totals?.google_requests) || 0,
     firstScheduledAt: totals?.first_scheduled_at ?? null,
+    lastSuccessAt: totals?.last_success_at ?? null,
+    lastFleetSuccessAt: totals?.last_fleet_success_at ?? null,
+    lastGoogleSuccessAt: totals?.last_google_success_at ?? null,
     last: last ?? null,
     statusCounts,
     httpErrors,

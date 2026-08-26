@@ -13,10 +13,6 @@ export function expectedBucketsSince(fromIso: string, to: Date, intervalMinutes:
   return Math.floor(elapsed / intervalMs) + 1;
 }
 
-export function shouldRunDual(scheduledAt: Date): boolean {
-  return scheduledAt.getUTCMinutes() % 30 === 0;
-}
-
 export function lockTtlSeconds(intervalMinutes: number): number {
   return Math.max(60, intervalMinutes * 60 - 30);
 }

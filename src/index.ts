@@ -5,6 +5,7 @@ import { requireAdmin } from "./admin";
 import {
   TOKEN_KEY,
   TESLA_SCOPES,
+  clearTokenCache,
   exchangeAuthorizationCode,
   pemFromEnv,
 } from "./auth/tesla";
@@ -79,6 +80,7 @@ export default {
       if (url.pathname === "/auth/logout") {
         const denied = await requireAdmin(request, env);
         if (denied) return denied;
+        clearTokenCache();
         await env.KV.delete(TOKEN_KEY);
         return text("Disconnected.\n");
       }
@@ -93,19 +95,23 @@ export default {
       if (url.pathname === "/collect" && request.method === "POST") {
         const denied = await requireAdmin(request, env);
         if (denied) return denied;
-        let forceSource: "fleet" | "graphql" | "auto" | undefined;
+        let forceSource: "fleet" | "google" | "auto" | undefined;
         if ((request.headers.get("content-type") ?? "").includes("application/json")) {
           const body = (await request.json()) as { force_source?: string };
           if (
             body.force_source === "fleet" ||
-            body.force_source === "graphql" ||
+            body.force_source === "google" ||
             body.force_source === "auto"
           ) {
             forceSource = body.force_source;
           }
         }
         const result = await runCollection(env, { force: true, forceSource });
-        const ok = result.status === "success" || result.status === "fleet_vehicle_offline" || result.status === "fleet_out_of_region";
+        const ok =
+          result.status === "success" ||
+          result.status === "fleet_vehicle_offline" ||
+          result.status === "fleet_out_of_region" ||
+          result.status === "google_cooldown";
         return Response.json(result, { status: ok ? 200 : 502 });
       }
 
