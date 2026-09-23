@@ -66,6 +66,12 @@ export type AppConfig = {
   teslaClientSecret: string;
   teslaPublicKey: string;
   adminToken: string;
+  wakeWhenAsleep: boolean;
+  wakeTimezone: string;
+  wakeStartHour: number;
+  wakeEndHour: number;
+  wakeTimeoutSeconds: number;
+  wakePollSeconds: number;
 };
 
 export type TeslaHttpResult = {

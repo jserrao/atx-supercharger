@@ -1,5 +1,5 @@
 import type { AppConfig, ChargerObservation, ProviderResult, VehicleSnapshot } from "../types";
-import { teslaGet } from "../auth/tesla";
+import { teslaGet, teslaPost } from "../auth/tesla";
 import { siteHardwareFromRaw } from "../hardware";
 import { asFiniteNumber, occupancyFromStalls, unixSecondsToIso } from "../observations";
 
@@ -107,6 +107,14 @@ export async function fetchVehicleList(
   const response = asRecord(result.data).response;
   const vehicle = pickVehicle(response, config.teslaVin);
   return { result, vehicle };
+}
+
+export async function wakeVehicle(
+  env: Env,
+  config: AppConfig,
+  vin: string,
+): Promise<Awaited<ReturnType<typeof teslaPost>>> {
+  return teslaPost(env, config, `/api/1/vehicles/${encodeURIComponent(vin)}/wake_up`);
 }
 
 export async function fetchNearbyChargingSites(

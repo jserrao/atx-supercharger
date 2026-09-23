@@ -2,7 +2,7 @@
 
 Headless Cloudflare Worker that records Tesla Supercharger utilization in western and southwest Austin every five minutes.
 
-Fleet API is the live occupancy source while the associated vehicle is online. Tesla does not offer a supported bbox occupancy API without an awake vehicle. When the vehicle is asleep, offline, returns `408`, or reports no in-bbox Superchargers, Google Places API (New) fills occupancy at most once per `GOOGLE_FALLBACK_MINUTES` (default 60). The collector never calls `wake_up` or `vehicle_data`.
+Fleet API is the live occupancy source while the associated vehicle is online. Tesla does not offer a supported bbox occupancy API without an awake vehicle. When the vehicle is asleep during local `WAKE_START_HOUR`–`WAKE_END_HOUR` (America/Chicago 8–15 by default), the collector calls `wake_up` once at the top of each hour, waits for `online`, then pulls Fleet occupancy. Other 5-minute ticks never wake the car. If the wake fails or the car is asleep outside that window, Google Places API (New) fills identity (not occupancy) at most once per `GOOGLE_FALLBACK_MINUTES` (default 60). The collector never calls `vehicle_data`.
 
 Tesla GraphQL is gone. Historical `source = graphql` sample rows are kept for provenance.
 

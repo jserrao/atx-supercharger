@@ -34,6 +34,13 @@ export function assembleHealth(args: {
   mode: string;
   googleOn: boolean;
   bbox: { north: number; south: number; west: number; east: number };
+  wake: {
+    enabled: boolean;
+    timezone: string;
+    startHour: number;
+    endHour: number;
+    timeoutSeconds: number;
+  };
 }): Record<string, unknown> {
   const scheduled = scheduledPolls(args.windowHours, args.intervalMinutes);
   const elapsed = args.stats.firstScheduledAt
@@ -88,6 +95,13 @@ export function assembleHealth(args: {
     last_success: args.stats.lastSuccessAt,
     last_fleet_success: args.stats.lastFleetSuccessAt,
     last_google_success: args.stats.lastGoogleSuccessAt,
+    wake: {
+      enabled: args.wake.enabled,
+      timezone: args.wake.timezone,
+      start_hour: args.wake.startHour,
+      end_hour: args.wake.endHour,
+      timeout_seconds: args.wake.timeoutSeconds,
+    },
     last_poll: last
       ? {
           id: last.id,
@@ -121,5 +135,12 @@ export async function healthPayload(env: Env, now = new Date(), windowHours = 24
     mode: config.collectorMode,
     googleOn: googleEnabled(config.collectorMode),
     bbox: config.bbox,
+    wake: {
+      enabled: config.wakeWhenAsleep,
+      timezone: config.wakeTimezone,
+      startHour: config.wakeStartHour,
+      endHour: config.wakeEndHour,
+      timeoutSeconds: config.wakeTimeoutSeconds,
+    },
   });
 }

@@ -64,6 +64,13 @@ describe("coverage formula", () => {
       mode: "auto",
       googleOn: true,
       bbox: { north: 30.5, south: 30, west: -98.25, east: -97.7 },
+      wake: {
+        enabled: true,
+        timezone: "America/Chicago",
+        startHour: 8,
+        endHour: 15,
+        timeoutSeconds: 48,
+      },
     });
 
     const coverage = payload.coverage as Record<string, number>;
@@ -72,6 +79,13 @@ describe("coverage formula", () => {
     const errors = payload.api_errors_by_source as { fleet: { http_status: number }[] };
 
     expect(payload.google_enabled).toBe(true);
+    expect(payload.wake).toEqual({
+      enabled: true,
+      timezone: "America/Chicago",
+      start_hour: 8,
+      end_hour: 15,
+      timeout_seconds: 48,
+    });
     expect(coverage.scheduled_polls).toBe(288);
     expect(coverage.successful_polls).toBe(40);
     expect(coverage.coverage_pct).toBe(13.9);

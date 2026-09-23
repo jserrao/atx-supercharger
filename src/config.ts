@@ -10,8 +10,15 @@ function mode(value: string | undefined): CollectorMode {
   return "fleet_only";
 }
 
-function flag(value: string | undefined): boolean {
-  return String(value ?? "").trim().toLowerCase() === "true";
+function flag(value: string | undefined, fallback = false): boolean {
+  if (value == null || String(value).trim() === "") return fallback;
+  return String(value).trim().toLowerCase() === "true";
+}
+
+function hour(value: string | undefined, fallback: number): number {
+  const parsed = Math.trunc(num(value, fallback));
+  if (parsed < 0 || parsed > 23) return fallback;
+  return parsed;
 }
 
 export function loadConfig(env: Env): AppConfig {
@@ -39,6 +46,12 @@ export function loadConfig(env: Env): AppConfig {
     teslaClientSecret: env.TESLA_CLIENT_SECRET,
     teslaPublicKey: env.TESLA_PUBLIC_KEY,
     adminToken: env.COLLECTOR_ADMIN_TOKEN,
+    wakeWhenAsleep: flag(env.WAKE_WHEN_ASLEEP, true),
+    wakeTimezone: String(env.WAKE_TIMEZONE ?? "America/Chicago").trim() || "America/Chicago",
+    wakeStartHour: hour(env.WAKE_START_HOUR, 8),
+    wakeEndHour: hour(env.WAKE_END_HOUR, 15),
+    wakeTimeoutSeconds: Math.min(60, Math.max(10, num(env.WAKE_TIMEOUT_SECONDS, 48))),
+    wakePollSeconds: Math.min(20, Math.max(2, num(env.WAKE_POLL_SECONDS, 8))),
   };
 }
 

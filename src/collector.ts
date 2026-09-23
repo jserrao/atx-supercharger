@@ -2,7 +2,7 @@ import { googleEnabled, loadConfig } from "./config";
 import { cadenceBucket, lockTtlSeconds } from "./cadence";
 import { logError, logInfo } from "./log";
 import { filterToBbox } from "./observations";
-import { fetchNearbyChargingSites, fetchVehicleList } from "./providers/fleet";
+import { fetchNearbyChargingSites, fetchVehicleList, wakeVehicle } from "./providers/fleet";
 import { fetchGoogleNearbySites } from "./providers/google";
 import {
   claimPollRun,
@@ -15,6 +15,7 @@ import {
 } from "./storage/d1";
 import { haversineMeters, namesReasonablyMatch } from "./geo";
 import { sanitizeRaw } from "./redact";
+import { shouldWakeForOccupancy } from "./wake";
 import type {
   AppConfig,
   ChargerObservation,
@@ -179,6 +180,107 @@ async function handleGoogleResult(
   };
 }
 
+type FleetHandle = {
+  fleetStatus: number;
+  sampleCount: number;
+  persisted: ChargerObservation[];
+  sourceUsed: string | null;
+  status: PollStatus;
+  error: string | null;
+  needGoogle: boolean;
+  googleReason: PollStatus;
+};
+
+async function captureFleet(
+  env: Env,
+  config: AppConfig,
+  pollRunId: string,
+  scheduledAt: string,
+  startedAt: string,
+  vin: string,
+  vinForCall: string,
+): Promise<FleetHandle> {
+  const fleet = await retry5xx(() => fetchNearbyChargingSites(env, config, vinForCall, startedAt));
+  await insertRawResponse(env.DB, pollRunId, "fleet", startedAt, sanitizeRaw(fleet.raw, vin));
+
+  let sampleCount = 0;
+  let persisted: ChargerObservation[] = [];
+  let sourceUsed: string | null = null;
+  let status: PollStatus = "no_data";
+  let error: string | null = null;
+
+  if (fleet.ok) {
+    const inBbox = filterToBbox(fleet.observations, config.bbox);
+    if (inBbox.length > 0) {
+      const saved = await persistObservations(env.DB, config, pollRunId, scheduledAt, inBbox);
+      sampleCount = saved.sampleCount;
+      persisted = inBbox;
+      sourceUsed = "fleet";
+      status = "success";
+    }
+  }
+
+  const needGoogle =
+    sampleCount === 0 &&
+    (fleet.status === 408 || (fleet.ok && filterToBbox(fleet.observations, config.bbox).length === 0));
+
+  if (fleet.status === 429 && sampleCount === 0) {
+    status = "rate_limited";
+    error = "fleet_rate_limited";
+  } else if (!fleet.ok && sampleCount === 0 && fleet.status !== 429 && fleet.status !== 408) {
+    status = "fleet_error";
+    error = fleet.error;
+  }
+
+  return {
+    fleetStatus: fleet.status,
+    sampleCount,
+    persisted,
+    sourceUsed,
+    status,
+    error,
+    needGoogle,
+    googleReason: fleet.status === 408 ? "fleet_vehicle_offline" : "fleet_out_of_region",
+  };
+}
+
+async function wakeForOccupancy(
+  env: Env,
+  config: AppConfig,
+  vin: string,
+): Promise<{ online: boolean; status: number; waitMs: number; error: string | null }> {
+  const started = Date.now();
+  let wake = await wakeVehicle(env, config, vin);
+  if (wake.status >= 500) {
+    await sleep(jitterDelay());
+    wake = await wakeVehicle(env, config, vin);
+  }
+  logInfo(vin, { message: "wake_up", status: wake.status, ok: wake.ok });
+  if (!wake.ok) {
+    return {
+      online: false,
+      status: wake.status,
+      waitMs: Date.now() - started,
+      error: asError(wake.data) ?? `wake_http_${wake.status}`,
+    };
+  }
+
+  const deadline = Date.now() + config.wakeTimeoutSeconds * 1000;
+  while (Date.now() < deadline) {
+    await sleep(config.wakePollSeconds * 1000);
+    const { vehicle } = await fetchVehicleList(env, config);
+    if (vehicle?.state === "online") {
+      return { online: true, status: wake.status, waitMs: Date.now() - started, error: null };
+    }
+  }
+  return {
+    online: false,
+    status: wake.status,
+    waitMs: Date.now() - started,
+    error: "wake_timeout",
+  };
+}
+
 async function collectFromGoogle(
   env: Env,
   config: AppConfig,
@@ -269,6 +371,10 @@ export async function runCollection(env: Env, options: CollectOptions = {}): Pro
   let error: string | null = null;
   let sampleCount = 0;
   let persisted: ChargerObservation[] = [];
+  let wakeAttempted = false;
+  let wakeStatus: number | null = null;
+  let wakeWaitMs: number | null = null;
+  let wakeError: string | null = null;
 
   const finishGoogle = (result: GoogleHandle) => {
     status = result.status;
@@ -310,108 +416,104 @@ export async function runCollection(env: Env, options: CollectOptions = {}): Pro
       } else if (!vehicle) {
         status = "fleet_error";
         error = "vehicle_not_found";
-      } else if (options.forceSource !== "fleet" && vehicleState && vehicleState !== "online") {
-        if (googleEnabled(mode)) {
-          finishGoogle(
-            await collectFromGoogle(
-              env,
-              config,
-              pollRunId,
-              scheduledAt,
-              startedAt,
-              vin,
-              "fleet_vehicle_offline",
-              { bypassCooldown: false, now, persist: true },
-            ),
-          );
-        } else {
-          status = "fleet_vehicle_offline";
-          error = `vehicle_${vehicleState}`;
-        }
       } else {
-        const vinForCall = vehicle?.vin ?? config.teslaVin;
+        const vinForCall = vehicle.vin ?? config.teslaVin;
         if (!vinForCall) {
           status = "fleet_error";
           error = "vin_not_configured";
         } else {
-          const fleet = await retry5xx(() =>
-            fetchNearbyChargingSites(env, config, vinForCall, startedAt),
-          );
-          fleetStatus = fleet.status;
-          await insertRawResponse(env.DB, pollRunId, "fleet", startedAt, sanitizeRaw(fleet.raw, vin));
-
-          if (fleet.ok) {
-            const inBbox = filterToBbox(fleet.observations, config.bbox);
-            if (inBbox.length > 0) {
-              const saved = await persistObservations(
-                env.DB,
-                config,
-                pollRunId,
-                scheduledAt,
-                inBbox,
-              );
-              sampleCount = saved.sampleCount;
-              persisted = inBbox;
-              sourceUsed = "fleet";
-              status = "success";
-            }
+          const forceFleet = options.forceSource === "fleet";
+          if (
+            vehicleState &&
+            vehicleState !== "online" &&
+            shouldWakeForOccupancy(config, new Date(scheduledAt), forceFleet)
+          ) {
+            const wake = await wakeForOccupancy(env, config, vinForCall);
+            wakeAttempted = true;
+            wakeStatus = wake.status;
+            wakeWaitMs = wake.waitMs;
+            wakeError = wake.error;
+            if (wake.online) vehicleState = "online";
           }
 
-          const needGoogle =
-            sampleCount === 0 &&
-            (fleet.status === 408 || (fleet.ok && filterToBbox(fleet.observations, config.bbox).length === 0));
-
-          if (fleet.status === 429 && sampleCount === 0) {
-            status = "rate_limited";
-            error = "fleet_rate_limited";
-          } else if (needGoogle && sampleCount === 0) {
-            const reason: PollStatus = fleet.status === 408 ? "fleet_vehicle_offline" : "fleet_out_of_region";
-            if (googleEnabled(mode)) {
-              finishGoogle(
-                await collectFromGoogle(
-                  env,
-                  config,
-                  pollRunId,
-                  scheduledAt,
-                  startedAt,
-                  vin,
-                  reason,
-                  { bypassCooldown: false, now, persist: true },
-                ),
-              );
-            } else if (fleet.ok) {
-              status = "fleet_out_of_region";
-              error = "no_in_bbox_superchargers";
-            } else {
-              status = "fleet_vehicle_offline";
-              error = fleet.error;
-            }
-          } else if (!fleet.ok && sampleCount === 0 && fleet.status !== 429) {
-            status = "fleet_error";
-            error = fleet.error;
-          }
-
-          if (mode === "dual" && sourceUsed === "fleet" && googleEnabled(mode)) {
-            const compare = await collectFromGoogle(
+          if (vehicleState === "online") {
+            const fleetCapture = await captureFleet(
               env,
               config,
               pollRunId,
               scheduledAt,
               startedAt,
               vin,
-              "google_error",
-              { bypassCooldown: false, now, persist: false },
+              vinForCall,
             );
-            googleStatus = compare.googleStatus;
-            googleRequests += compare.googleRequests;
-            if (compare.status === "success" || compare.persisted.length > 0) {
-              await insertComparisons(
-                env.DB,
-                pollRunId,
-                startedAt,
-                buildComparisons(persisted, compare.persisted, config.matchDistanceMeters),
-              );
+            fleetStatus = fleetCapture.fleetStatus;
+            sampleCount = fleetCapture.sampleCount;
+            persisted = fleetCapture.persisted;
+            sourceUsed = fleetCapture.sourceUsed;
+            status = fleetCapture.status;
+            error = fleetCapture.error;
+
+            if (fleetCapture.needGoogle && sampleCount === 0) {
+              if (googleEnabled(mode) && !forceFleet) {
+                finishGoogle(
+                  await collectFromGoogle(
+                    env,
+                    config,
+                    pollRunId,
+                    scheduledAt,
+                    startedAt,
+                    vin,
+                    fleetCapture.googleReason,
+                    { bypassCooldown: false, now, persist: true },
+                  ),
+                );
+              } else if (fleetCapture.fleetStatus === 408) {
+                status = "fleet_vehicle_offline";
+                error = fleetCapture.error ?? `vehicle_${vehicleState}`;
+              } else {
+                status = "fleet_out_of_region";
+                error = "no_in_bbox_superchargers";
+              }
             }
+
+            if (mode === "dual" && sourceUsed === "fleet" && googleEnabled(mode)) {
+              const compare = await collectFromGoogle(
+                env,
+                config,
+                pollRunId,
+                scheduledAt,
+                startedAt,
+                vin,
+                "google_error",
+                { bypassCooldown: false, now, persist: false },
+              );
+              googleStatus = compare.googleStatus;
+              googleRequests += compare.googleRequests;
+              if (compare.status === "success" || compare.persisted.length > 0) {
+                await insertComparisons(
+                  env.DB,
+                  pollRunId,
+                  startedAt,
+                  buildComparisons(persisted, compare.persisted, config.matchDistanceMeters),
+                );
+              }
+            }
+          } else if (googleEnabled(mode) && !forceFleet) {
+            finishGoogle(
+              await collectFromGoogle(
+                env,
+                config,
+                pollRunId,
+                scheduledAt,
+                startedAt,
+                vin,
+                "fleet_vehicle_offline",
+                { bypassCooldown: false, now, persist: true },
+              ),
+            );
+          } else {
+            status = "fleet_vehicle_offline";
+            error = wakeError ?? `vehicle_${vehicleState}`;
           }
         }
       }
@@ -443,6 +545,10 @@ export async function runCollection(env: Env, options: CollectOptions = {}): Pro
       fleet_status: fleetStatus,
       google_status: googleStatus,
       google_requests: googleRequests,
+      wake_attempted: wakeAttempted,
+      wake_status: wakeStatus,
+      wake_wait_ms: wakeWaitMs,
+      wake_error: wakeError,
       latency_ms: Date.now() - startedMs,
     });
 
@@ -456,6 +562,10 @@ export async function runCollection(env: Env, options: CollectOptions = {}): Pro
       fleet_status: fleetStatus,
       google_status: googleStatus,
       google_requests: googleRequests,
+      wake_attempted: wakeAttempted,
+      wake_status: wakeStatus,
+      wake_wait_ms: wakeWaitMs,
+      wake_error: wakeError,
       error,
     };
   } catch (caught) {

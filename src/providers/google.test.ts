@@ -27,6 +27,12 @@ function config(): AppConfig {
     teslaClientSecret: "",
     teslaPublicKey: "",
     adminToken: "",
+    wakeWhenAsleep: true,
+    wakeTimezone: "America/Chicago",
+    wakeStartHour: 8,
+    wakeEndHour: 15,
+    wakeTimeoutSeconds: 48,
+    wakePollSeconds: 8,
   };
 }
 

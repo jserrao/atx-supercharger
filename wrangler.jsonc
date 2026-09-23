@@ -22,7 +22,13 @@
     "RAW_RETENTION_DAYS": "14",
     "GOOGLE_FALLBACK_MINUTES": "60",
     "GOOGLE_DISCOVERY": "false",
-    "COLLECTOR_MODE": "auto"
+    "COLLECTOR_MODE": "auto",
+    "WAKE_WHEN_ASLEEP": "true",
+    "WAKE_TIMEZONE": "America/Chicago",
+    "WAKE_START_HOUR": "8",
+    "WAKE_END_HOUR": "15",
+    "WAKE_TIMEOUT_SECONDS": "48",
+    "WAKE_POLL_SECONDS": "8"
   },
   "kv_namespaces": [
     {

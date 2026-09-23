@@ -125,9 +125,10 @@ export async function exchangeAuthorizationCode(
   await saveTokens(env, config, payload);
 }
 
-export async function teslaGet(
+async function teslaFetch(
   env: Env,
   config: AppConfig,
+  method: "GET" | "POST",
   path: string,
   retried = false,
 ): Promise<TeslaHttpResult> {
@@ -136,14 +137,19 @@ export async function teslaGet(
     return {
       ok: false,
       status: 401,
-      method: "GET",
+      method,
       path,
       data: { error: "not_connected" },
     };
   }
 
   const response = await fetch(`${config.teslaAudience}${path}`, {
-    headers: { authorization: `Bearer ${accessToken}` },
+    method,
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      ...(method === "POST" ? { "content-type": "application/json" } : {}),
+    },
+    ...(method === "POST" ? { body: "{}" } : {}),
   });
   let data: unknown = null;
   try {
@@ -154,14 +160,30 @@ export async function teslaGet(
 
   if (response.status === 401 && !retried) {
     const refreshed = await getAccessToken(env, config, true);
-    if (refreshed) return teslaGet(env, config, path, true);
+    if (refreshed) return teslaFetch(env, config, method, path, true);
   }
 
   return {
     ok: response.ok,
     status: response.status,
-    method: "GET",
+    method,
     path,
     data,
   };
+}
+
+export function teslaGet(
+  env: Env,
+  config: AppConfig,
+  path: string,
+): Promise<TeslaHttpResult> {
+  return teslaFetch(env, config, "GET", path);
+}
+
+export function teslaPost(
+  env: Env,
+  config: AppConfig,
+  path: string,
+): Promise<TeslaHttpResult> {
+  return teslaFetch(env, config, "POST", path);
 }
