@@ -2,7 +2,7 @@ import type { AppConfig, TeslaHttpResult } from "../types";
 import { logInfo } from "../log";
 
 export const TOKEN_KEY = "oauth:tokens";
-export const TESLA_SCOPES = "openid offline_access vehicle_device_data";
+export const TESLA_SCOPES = "openid offline_access vehicle_device_data vehicle_cmds";
 
 type TokenBlob = {
   access_token: string;
